@@ -1,0 +1,6 @@
+{
+    "serverchan_token": "你的Server酱SendKey",
+    "base_url": "https://jw.jnu.edu.cn",
+    "check_interval_minutes": 10,
+    "chrome_user_data_dir": ""
+}

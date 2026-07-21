@@ -1,28 +1,8 @@
-# Python
+data/
+logs/
+config.json
 __pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-dist/
-build/
-
-# 运行时生成的文件（含敏感信息，不要上传）
-cookies.json
-grades_history.json
-api_capture.json
-debug_response.json
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# 系统文件
-.DS_Store
-Thumbs.db
-
-# 虚拟环境
-venv/
+*.pyc
+.env
 .venv/
-env/
+.idea/

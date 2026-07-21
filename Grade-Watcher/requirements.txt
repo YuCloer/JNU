@@ -1,3 +1,7 @@
-requests>=2.31.0
-beautifulsoup4>=4.12.0
-playwright>=1.40.0
+playwright>=1.44
+httpx>=0.27
+click>=8.1
+loguru>=0.7
+cryptography>=42.0
+pydantic-settings>=2.3
+win11toast>=0.8

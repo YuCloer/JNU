@@ -1,144 +1,138 @@
 """
-成绩监控主程序。
+JNU-Grade Checker Guard — 暨南大学成绩监控与GPA计算
 用法：
-    python main.py login    — 打开浏览器登录（首次或 Cookie 过期时）
-    python main.py check    — 手动查一次成绩
-    python main.py test     — 发一条测试通知到微信
-    python main.py daemon   — 后台持续监控，每 N 分钟检查一次
+    python main.py login        首次登录，保存 Cookie
+    python main.py check        单次查询新成绩
+    python main.py daemon       守护进程，定时轮询
+    python main.py gpa          当前学期 GPA
+    python main.py gpa --all    全部学期 GPA
 """
-import json
-import sys
 import time
-import threading
-from datetime import datetime
-
-from login import login, reauth
-from checker import check_new_grades
-from notifier import send_notification, send_raw
-
-
-def load_config() -> dict:
-    with open("config.json", "r", encoding="utf-8") as f:
-        return json.load(f)
+import click
+from app.utils.config import load_settings
+from app.utils.logger import logger
+from app.core.auth import login, reauth
+from app.core.fetcher import fetch_grades
+from app.core.comparator import check_new_grades
+from app.core.gpa import calc_gpa, calc_semester_gpa, calc_year_gpa, get_current_semester, format_gpa_report
+from app.notify.serverchan import send_grades, send_raw
+from app.notify.toast import show_toast
 
 
-def cmd_login(config: dict):
-    """登录教务系统，保存 Cookie"""
-    login(config)
-    print("\n[完成] Cookie 已保存，接下来可以运行 check 或 daemon")
+@click.group()
+def cli():
+    """暨南大学成绩监控与GPA计算工具"""
+    pass
 
 
-def cmd_check(config: dict):
-    """手动检查一次新成绩"""
+@cli.command(name="login")
+def login_cmd():
+    """首次登录，保存 Cookie"""
+    settings = load_settings()
+    login(settings)
+    logger.info("登录完成，正在拉取成绩...")
     try:
-        new_grades = check_new_grades(config)
-        if new_grades:
-            for g in new_grades:
-                credit = f"({g['_credit']}学分)" if g["_credit"] else ""
-                print(f"  -> {g['_course']}: {g['_grade']} {credit}")
-        return new_grades
-    except PermissionError as e:
-        print(f"[错误] {e}")
-        return None
+        grades = fetch_grades(settings)
+        check_new_grades(settings, grades)
+        semester = get_current_semester(grades)
+        sem_gpa = calc_semester_gpa(grades, semester)
+        year_gpa = calc_year_gpa(grades, semester)
+        total_gpa = calc_gpa(grades)
+        click.echo(f"\n  当前学期({semester}) GPA: {sem_gpa:.2f}")
+        click.echo(f"  学年 GPA: {year_gpa:.2f}")
+        click.echo(f"  总 GPA: {total_gpa:.2f}")
+        click.echo(f"  共 {len(grades)} 条成绩已写入基线\n")
     except Exception as e:
-        print(f"[错误] 查询失败: {e}")
-        return None
+        logger.error(f"登录后拉取成绩失败: {e}")
 
 
-def cmd_test(config: dict):
-    """发送测试通知"""
-    token = config["serverchan_token"]
-    if "在这里" in token or not token:
-        print("[错误] 请先在 config.json 中填写 Server酱 SendKey")
+@cli.command()
+def check():
+    """单次查询新成绩"""
+    settings = load_settings()
+    try:
+        grades = fetch_grades(settings)
+        new_grades = check_new_grades(settings, grades)
+        if new_grades:
+            semester = get_current_semester(grades)
+            sem_gpa = calc_semester_gpa(grades, semester)
+            year_gpa = calc_year_gpa(grades, semester)
+            total_gpa = calc_gpa(grades)
+            for g in new_grades:
+                click.echo(f"  新: {g['course']} {g['grade']}分 绩点{g['gpa_point']}")
+            click.echo(f"  本学期GPA: {sem_gpa:.2f}  学年GPA: {year_gpa:.2f}  总GPA: {total_gpa:.2f}")
+            if settings.serverchan_token:
+                send_grades(settings.serverchan_token, new_grades, sem_gpa, year_gpa, total_gpa)
+                show_toast("新成绩通知", f"{len(new_grades)} 条新成绩已推送")
+    except PermissionError:
+        logger.error("Session 已过期，请运行 python main.py login")
+    except Exception as e:
+        logger.error(f"查询失败: {e}")
+
+
+@cli.command()
+def daemon():
+    """守护进程，定时轮询"""
+    settings = load_settings()
+    interval = settings.check_interval_minutes
+    token = settings.serverchan_token
+
+    if not token:
+        logger.error("请先在 config.json 中填写 serverchan_token")
         return
 
-    ok = send_raw(token, "成绩监控测试", "如果你收到这条消息，说明 Server酱配置正确！")
-    if ok:
-        print("[测试] 推送成功，请检查微信是否收到消息")
-    else:
-        print("[测试] 推送失败，请检查 SendKey 是否正确")
-
-
-def cmd_daemon(config: dict):
-    """后台持续监控"""
-    interval = config["check_interval_minutes"]
-    token = config["serverchan_token"]
-
-    if "在这里" in token or not token:
-        print("[错误] 请先在 config.json 中填写 Server酱 SendKey")
-        return
-
-    print(f"[监控] 启动！每 {interval} 分钟检查一次成绩")
-    print("[监控] 按 Ctrl+C 停止\n")
-
-    # 启动时通知
-    send_raw(token, "成绩监控已启动", f"每 {interval} 分钟检查一次，有新成绩会通知你")
-
-    fail_count = 0
+    logger.info(f"监控启动，每 {interval} 分钟检查一次（Ctrl+C 停止）")
+    send_raw(token, "成绩监控已启动", f"每 {interval} 分钟检查一次")
 
     while True:
-        now = datetime.now().strftime("%H:%M:%S")
-
-        print(f"\n[{now}] 检查中...")
-
         try:
-            new_grades = check_new_grades(config)
-
+            grades = fetch_grades(settings)
+            new_grades = check_new_grades(settings, grades)
             if new_grades:
-                send_notification(token, new_grades)
-
-            fail_count = 0  # 成功则重置
+                semester = get_current_semester(grades)
+                sem_gpa = calc_semester_gpa(grades, semester)
+                year_gpa = calc_year_gpa(grades, semester)
+                total_gpa = calc_gpa(grades)
+                send_grades(token, new_grades, sem_gpa, year_gpa, total_gpa)
+                show_toast("新成绩通知", f"{len(new_grades)} 条新成绩")
 
         except PermissionError:
-            # EMAP session 过期（约 90 分钟硬性超时），尝试 CAS 静默重认证
-            print(f"[{now}] EMAP session 已过期，尝试自动重认证...")
-            if reauth(config):
-                # 重认证成功，立即重试查询
-                print(f"[{now}] 重认证成功，重新查询成绩...")
-                try:
-                    new_grades = check_new_grades(config)
-                    if new_grades:
-                        send_notification(token, new_grades)
-                    fail_count = 0
-                except Exception as e2:
-                    print(f"[{now}] 重认证后查询仍失败: {e2}")
+            logger.warning("Session 过期，尝试重认证...")
+            if reauth(settings):
+                logger.info("重认证成功，下轮继续")
             else:
-                # CAS 也过期了，需要手动登录
-                print(f"[{now}] CAS 也已过期，需要手动登录")
-                send_raw(token, "Cookie 已过期", "CAS 和 EMAP 均已过期，请运行 python main.py login 重新登录")
+                logger.error("重认证失败（3次），推送告警并退出")
+                send_raw(token, "成绩监控异常", "重认证失败，请运行 python main.py login")
                 break
 
         except Exception as e:
-            fail_count += 1
-            print(f"[{now}] 查询出错: {e}")
-
-            # 连续失败 5 次才告警，避免网络波动导致刷屏
-            if fail_count == 5:
-                send_raw(token, "成绩查询连续失败", f"已失败 {fail_count} 次: {e}")
+            logger.error(f"本轮查询异常: {e}")
 
         time.sleep(interval * 60)
 
 
-def main():
-    if len(sys.argv) < 2:
-        print(__doc__)
-        return
-
-    cmd = sys.argv[1].lower()
-    config = load_config()
-
-    if cmd == "login":
-        cmd_login(config)
-    elif cmd == "check":
-        cmd_check(config)
-    elif cmd == "test":
-        cmd_test(config)
-    elif cmd == "daemon":
-        cmd_daemon(config)
-    else:
-        print(f"未知命令: {cmd}")
-        print(__doc__)
+@cli.command()
+@click.option("--all", "show_all", is_flag=True, help="显示全部学期")
+@click.option("--semester", default=None, help="指定学期，如 2025-2026-2")
+def gpa(show_all, semester):
+    """GPA 计算"""
+    settings = load_settings()
+    try:
+        if semester:
+            grades = fetch_grades(settings, semester=semester)
+            click.echo(format_gpa_report(grades, semester))
+        elif show_all:
+            grades = fetch_grades(settings)
+            click.echo(format_gpa_report(grades))
+        else:
+            grades = fetch_grades(settings)
+            current = get_current_semester(grades)
+            click.echo(format_gpa_report(grades, current))
+    except PermissionError:
+        logger.error("Session 已过期，请运行 python main.py login")
+    except Exception as e:
+        logger.error(f"查询失败: {e}")
 
 
 if __name__ == "__main__":
-    main()
+    cli()
