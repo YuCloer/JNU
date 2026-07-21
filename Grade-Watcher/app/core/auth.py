@@ -29,6 +29,10 @@ async def do_login(settings: Settings):
             user_data_dir=user_data_dir,
             channel="chrome",
             headless=False,
+            args=[
+                "--enable-features=PasswordManagerOnboarding,PasswordManager",
+                "--password-store=basic",
+            ],
         )
         page = context.pages[0] if context.pages else await context.new_page()
 
@@ -76,11 +80,12 @@ async def do_login(settings: Settings):
 
 async def do_reauth(settings: Settings) -> bool:
     """
-    重认证：丢弃旧 context，新建 context 直接导航 CAS 登录页。
-    不走教务 URL 的 302 重定向链，规避 2 小时边界 RST 问题。
+    重认证：优先静默刷新（利用 persistent context 中的 CAS TGT cookie），
+    仅当 TGT 过期、页面落到登录表单时才需要用户手动操作。
     """
     user_data_dir = _get_user_data_dir(settings)
     backoff = [30, 60, 90]
+    target = f"{settings.base_url.rstrip('/')}{GRADE_PAGE}"
 
     for attempt, wait in enumerate(backoff):
         try:
@@ -89,32 +94,65 @@ async def do_reauth(settings: Settings) -> bool:
                     user_data_dir=user_data_dir,
                     channel="chrome",
                     headless=False,
+                    args=[
+                        "--enable-features=PasswordManagerOnboarding,PasswordManager",
+                        "--password-store=basic",
+                    ],
                 )
                 page = context.pages[0] if context.pages else await context.new_page()
 
-                logger.info(f"重认证尝试 {attempt + 1}/3，导航到 CAS 登录页")
-                await page.goto(CAS_LOGIN, wait_until="domcontentloaded", timeout=30000)
-                await asyncio.sleep(3)
+                logger.info(f"重认证尝试 {attempt + 1}/3，导航教务页触发 CAS 重定向...")
+                await page.goto(target, wait_until="domcontentloaded", timeout=30000)
 
-                # Chrome 密码管理器自动填充，用户只需确认/滑块
-                logger.info("请在浏览器中确认登录（滑块验证码）")
+                # 等待重定向链完成：可能直接回到教务（静默成功），也可能落到 CAS 登录页
                 try:
                     await page.wait_for_url(
-                        lambda url: "icas.jnu.edu.cn" not in url, timeout=120000
+                        lambda url: "jw.jnu.edu.cn" in url or "icas.jnu.edu.cn" in url,
+                        timeout=20000,
                     )
                 except Exception:
-                    logger.warning("重认证等待超时")
-                    await context.close()
-                    if attempt < 2:
-                        logger.info(f"{wait}秒后重试...")
-                        await asyncio.sleep(wait)
-                    continue
+                    pass
+                await asyncio.sleep(2)
 
-                # 导航到成绩页获取 EMAP session
-                target = f"{settings.base_url.rstrip('/')}{GRADE_PAGE}"
-                await page.goto(target, wait_until="domcontentloaded", timeout=30000)
-                await asyncio.sleep(3)
+                if "icas.jnu.edu.cn" in page.url:
+                    # TGT 过期，落到登录表单，需要用户手动完成
+                    logger.info("CAS TGT 已过期，请在浏览器中完成登录（滑块验证码）")
+                    try:
+                        await page.wait_for_url(
+                            lambda url: "icas.jnu.edu.cn" not in url, timeout=300000
+                        )
+                    except Exception:
+                        logger.warning("重认证等待超时")
+                        await context.close()
+                        if attempt < 2:
+                            logger.info(f"{wait}秒后重试...")
+                            await asyncio.sleep(wait)
+                        continue
 
+                    # 登录完成后等跳转回教务
+                    if "jw.jnu.edu.cn" not in page.url:
+                        try:
+                            await page.wait_for_url(
+                                lambda url: "jw.jnu.edu.cn" in url, timeout=30000
+                            )
+                        except Exception:
+                            pass
+
+                elif "jw.jnu.edu.cn" in page.url:
+                    logger.info("静默刷新成功（CAS TGT 有效，无需手动登录）")
+
+                else:
+                    # 未知状态，等一下再看
+                    await asyncio.sleep(3)
+                    if "jw.jnu.edu.cn" not in page.url:
+                        logger.warning(f"重认证后未到达教务页（当前: {page.url}）")
+                        await context.close()
+                        if attempt < 2:
+                            logger.info(f"{wait}秒后重试...")
+                            await asyncio.sleep(wait)
+                        continue
+
+                await asyncio.sleep(2)
                 cookies = await context.cookies()
                 encrypt_json(cookies, settings.cookies_path)
                 logger.info(f"重认证成功，已保存 {len(cookies)} 条 Cookie")
