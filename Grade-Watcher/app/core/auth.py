@@ -1,58 +1,33 @@
-"""CAS 认证：Playwright persistent context 复用 Chrome 密码管理器"""
+"""CAS 认证：保存 CASTGC 实现静默续期（沿用旧项目 grade-watcher 的成熟方案）
+
+原理：首次登录拿到全部 Cookie（含 CAS 的 CASTGC），加密存盘。
+重认证时把 CASTGC 注入新浏览器 context，走 CAS 重定向链自动换取新 EMAP session。
+CASTGC 每次使用会自动续期，因此只要 daemon 持续运行就永不过期，实现 7×24h 无人值守。
+仅当 CASTGC 真正过期（如长期停机）时才需要重新 login。
+"""
 import asyncio
-import os
-from pathlib import Path
 from playwright.async_api import async_playwright
 from app.utils.config import Settings
 from app.utils.crypto import encrypt_json, decrypt_json
 from app.utils.logger import logger
 
-CAS_LOGIN = "https://icas.jnu.edu.cn/cas/login"
 GRADE_PAGE = "/jwapp/sys/cjcx/*default/index.do"
 
 
-def _get_user_data_dir(settings: Settings) -> str:
-    if settings.chrome_user_data_dir:
-        return settings.chrome_user_data_dir
-    # 项目本地独立 profile，不和日常 Chrome 冲突
-    from app.utils.config import DATA_DIR
-    profile_dir = DATA_DIR / "chrome-profile"
-    profile_dir.mkdir(parents=True, exist_ok=True)
-    return str(profile_dir)
-
-
 async def do_login(settings: Settings):
-    """首次登录：打开浏览器，用户手动完成滑块，保存 Cookie"""
-    user_data_dir = _get_user_data_dir(settings)
+    """首次登录：打开浏览器，用户手动完成密码+滑块，保存全部 Cookie（含 CASTGC）"""
     async with async_playwright() as p:
-        context = await p.chromium.launch_persistent_context(
-            user_data_dir=user_data_dir,
-            channel="chrome",
-            headless=False,
-            args=[
-                "--enable-features=PasswordManagerOnboarding,PasswordManager",
-                "--password-store=basic",
-            ],
-        )
-        page = context.pages[0] if context.pages else await context.new_page()
+        browser = await p.chromium.launch(channel="chrome", headless=False)
+        context = await browser.new_context()
+        page = await context.new_page()
 
         target = f"{settings.base_url.rstrip('/')}{GRADE_PAGE}"
         logger.info("正在打开成绩查询页（会跳转 CAS 登录）...")
         await page.goto(target, wait_until="domcontentloaded", timeout=30000)
-
-        # 等 JS 重定向把页面带到 CAS 登录页（或已有 session 直接到成绩页）
-        try:
-            await page.wait_for_url(
-                lambda url: "icas.jnu.edu.cn" in url or "jw.jnu.edu.cn" in url,
-                timeout=15000,
-            )
-        except Exception:
-            pass
         await asyncio.sleep(2)
 
         if "icas.jnu.edu.cn" in page.url:
-            # 到了 CAS 登录页，等用户完成滑块+登录
-            logger.info("请在浏览器中完成滑块验证码并登录（最长等待 5 分钟）")
+            logger.info("请在浏览器中输入账号密码并完成滑块验证码（最长等待 5 分钟）")
             try:
                 await page.wait_for_url(
                     lambda url: "icas.jnu.edu.cn" not in url, timeout=300000
@@ -62,7 +37,6 @@ async def do_login(settings: Settings):
         else:
             logger.info("已有有效 session，无需重新登录")
 
-        # 等跳转到教务系统
         if "jw.jnu.edu.cn" not in page.url:
             try:
                 await page.wait_for_url(
@@ -74,93 +48,72 @@ async def do_login(settings: Settings):
         await asyncio.sleep(3)
         cookies = await context.cookies()
         encrypt_json(cookies, settings.cookies_path)
-        logger.info(f"已保存 {len(cookies)} 条 Cookie（加密）")
-        await context.close()
+        logger.info(f"已保存 {len(cookies)} 条 Cookie（含 CASTGC，加密）")
+        await browser.close()
 
 
 async def do_reauth(settings: Settings) -> bool:
     """
-    重认证：优先静默刷新（利用 persistent context 中的 CAS TGT cookie），
-    仅当 TGT 过期、页面落到登录表单时才需要用户手动操作。
+    静默重认证：加载已保存的 Cookie（含 CASTGC）注入新 context，
+    走 CAS 重定向链自动换取新 EMAP session，全程无需用户干预。
     """
-    user_data_dir = _get_user_data_dir(settings)
+    saved_cookies = decrypt_json(settings.cookies_path)
+    if not saved_cookies:
+        logger.warning("无已保存的 Cookie，无法静默重认证，请运行 python main.py login")
+        return False
+
     backoff = [30, 60, 90]
     target = f"{settings.base_url.rstrip('/')}{GRADE_PAGE}"
 
     for attempt, wait in enumerate(backoff):
+        browser = None
         try:
             async with async_playwright() as p:
-                context = await p.chromium.launch_persistent_context(
-                    user_data_dir=user_data_dir,
-                    channel="chrome",
-                    headless=False,
-                    args=[
-                        "--enable-features=PasswordManagerOnboarding,PasswordManager",
-                        "--password-store=basic",
-                    ],
-                )
-                page = context.pages[0] if context.pages else await context.new_page()
+                browser = await p.chromium.launch(channel="chrome", headless=False)
+                context = await browser.new_context()
+                # 注入已保存的 Cookie（关键是 CAS 的 CASTGC）
+                await context.add_cookies(saved_cookies)
+                page = await context.new_page()
 
-                logger.info(f"重认证尝试 {attempt + 1}/3，导航教务页触发 CAS 重定向...")
+                logger.info(f"重认证尝试 {attempt + 1}/3，注入 CASTGC 走 CAS 重定向链...")
                 await page.goto(target, wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(3)
 
-                # 等待重定向链完成：可能直接回到教务（静默成功），也可能落到 CAS 登录页
-                try:
-                    await page.wait_for_url(
-                        lambda url: "jw.jnu.edu.cn" in url or "icas.jnu.edu.cn" in url,
-                        timeout=20000,
-                    )
-                except Exception:
-                    pass
-                await asyncio.sleep(2)
+                # 落到 CAS 登录表单 = CASTGC 过期，静默重认证失败
+                if "icas.jnu.edu.cn" in page.url and "login" in page.url:
+                    logger.warning("CASTGC 已过期，静默重认证失败，请运行 python main.py login")
+                    await browser.close()
+                    return False
 
-                if "icas.jnu.edu.cn" in page.url:
-                    # TGT 过期，落到登录表单，需要用户手动完成
-                    logger.info("CAS TGT 已过期，请在浏览器中完成登录（滑块验证码）")
+                # 等重定向链跑完
+                if "jw.jnu.edu.cn" not in page.url:
                     try:
                         await page.wait_for_url(
-                            lambda url: "icas.jnu.edu.cn" not in url, timeout=300000
+                            lambda url: "jw.jnu.edu.cn" in url, timeout=15000
                         )
                     except Exception:
-                        logger.warning("重认证等待超时")
-                        await context.close()
-                        if attempt < 2:
-                            logger.info(f"{wait}秒后重试...")
-                            await asyncio.sleep(wait)
-                        continue
-
-                    # 登录完成后等跳转回教务
-                    if "jw.jnu.edu.cn" not in page.url:
-                        try:
-                            await page.wait_for_url(
-                                lambda url: "jw.jnu.edu.cn" in url, timeout=30000
-                            )
-                        except Exception:
-                            pass
-
-                elif "jw.jnu.edu.cn" in page.url:
-                    logger.info("静默刷新成功（CAS TGT 有效，无需手动登录）")
-
-                else:
-                    # 未知状态，等一下再看
-                    await asyncio.sleep(3)
-                    if "jw.jnu.edu.cn" not in page.url:
-                        logger.warning(f"重认证后未到达教务页（当前: {page.url}）")
-                        await context.close()
+                        logger.warning(f"重定向未完成: {page.url}")
+                        await browser.close()
                         if attempt < 2:
                             logger.info(f"{wait}秒后重试...")
                             await asyncio.sleep(wait)
                         continue
 
                 await asyncio.sleep(2)
-                cookies = await context.cookies()
-                encrypt_json(cookies, settings.cookies_path)
-                logger.info(f"重认证成功，已保存 {len(cookies)} 条 Cookie")
-                await context.close()
+                new_cookies = await context.cookies()
+                encrypt_json(new_cookies, settings.cookies_path)
+                logger.info(f"静默重认证成功，已保存 {len(new_cookies)} 条新 Cookie")
+                await browser.close()
                 return True
 
         except Exception as e:
             logger.error(f"重认证异常: {e}")
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+            # 网络层错误 ≠ CASTGC 过期，退避后重试
             if attempt < 2:
                 logger.info(f"{wait}秒后重试...")
                 await asyncio.sleep(wait)
