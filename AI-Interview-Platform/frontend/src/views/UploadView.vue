@@ -1,0 +1,179 @@
+<template>
+  <div class="upload-page">
+    <h2 class="page-title">简历智能解析</h2>
+    <p class="page-desc">上传 PDF 或 Word 格式简历，AI 自动提取结构化信息</p>
+
+    <!-- 上传区域 -->
+    <div class="card" v-if="!resumeData">
+      <div
+        class="drop-zone"
+        :class="{ dragging: isDragging }"
+        @dragover.prevent="isDragging = true"
+        @dragleave="isDragging = false"
+        @drop.prevent="handleDrop"
+        @click="triggerFileInput"
+      >
+        <input ref="fileInput" type="file" accept=".pdf,.docx" hidden @change="handleFileSelect" />
+        <div class="drop-icon">📄</div>
+        <p class="drop-text">拖拽文件到此处，或点击选择</p>
+        <p class="drop-hint">支持 PDF、Word(.docx) 格式</p>
+      </div>
+    </div>
+
+    <!-- 解析中 -->
+    <div class="card" v-if="parsing">
+      <div class="loading">AI 正在解析简历，请稍候</div>
+    </div>
+
+    <!-- 错误提示 -->
+    <div class="card error-card" v-if="error">
+      <p>⚠️ {{ error }}</p>
+      <button class="btn btn-secondary" @click="reset">重新上传</button>
+    </div>
+
+    <!-- 解析结果预览 -->
+    <div v-if="resumeData && !parsing">
+      <div class="card">
+        <div class="card-title">基本信息</div>
+        <div class="info-grid">
+          <div class="info-item">
+            <label>姓名</label>
+            <input v-model="resumeData.name" />
+          </div>
+          <div class="info-item">
+            <label>邮箱</label>
+            <input v-model="resumeData.email" />
+          </div>
+          <div class="info-item">
+            <label>手机</label>
+            <input v-model="resumeData.phone" />
+          </div>
+        </div>
+      </div>
+
+      <div class="card" v-if="resumeData.education && resumeData.education.length">
+        <div class="card-title">教育经历</div>
+        <div v-for="(edu, i) in resumeData.education" :key="i" class="edu-item">
+          <strong>{{ edu.school }}</strong> · {{ edu.major }} · {{ edu.degree }}
+          <span class="edu-date">{{ edu.start_date }} - {{ edu.end_date }}</span>
+        </div>
+      </div>
+
+      <div class="card" v-if="resumeData.skills && resumeData.skills.length">
+        <div class="card-title">技能标签</div>
+        <div class="tags-wrap">
+          <span class="tag" v-for="(skill, i) in resumeData.skills" :key="i">{{ skill }}</span>
+        </div>
+      </div>
+
+      <div class="card" v-if="resumeData.projects && resumeData.projects.length">
+        <div class="card-title">项目经历</div>
+        <div v-for="(proj, i) in resumeData.projects" :key="i" class="proj-item">
+          <strong>{{ proj.name }}</strong>
+          <span v-if="proj.role"> · {{ proj.role }}</span>
+          <p class="proj-desc">{{ proj.description }}</p>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="btn btn-primary" @click="goToMatch">下一步：JD 匹配 →</button>
+        <button class="btn btn-secondary" @click="reset">重新上传</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { uploadResume } from '../api'
+
+const router = useRouter()
+const fileInput = ref(null)
+const isDragging = ref(false)
+const parsing = ref(false)
+const error = ref('')
+const resumeData = ref(null)
+
+function triggerFileInput() {
+  fileInput.value.click()
+}
+
+function handleDrop(e) {
+  isDragging.value = false
+  const file = e.dataTransfer.files[0]
+  if (file) processFile(file)
+}
+
+function handleFileSelect(e) {
+  const file = e.target.files[0]
+  if (file) processFile(file)
+}
+
+async function processFile(file) {
+  if (!file.name.match(/\.(pdf|docx)$/i)) {
+    error.value = '仅支持 PDF 和 Word(.docx) 格式'
+    return
+  }
+  error.value = ''
+  parsing.value = true
+  try {
+    const res = await uploadResume(file)
+    resumeData.value = res.data.data
+  } catch (e) {
+    error.value = e.response?.data?.detail || '解析失败，请重试'
+  } finally {
+    parsing.value = false
+  }
+}
+
+function reset() {
+  resumeData.value = null
+  error.value = ''
+}
+
+function goToMatch() {
+  // 通过 sessionStorage 传递简历数据
+  sessionStorage.setItem('resumeData', JSON.stringify(resumeData.value))
+  router.push('/match')
+}
+</script>
+
+<style scoped>
+.page-title { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+.page-desc { color: #9898b0; font-size: 14px; margin-bottom: 24px; }
+
+.drop-zone {
+  border: 2px dashed #2a2a38;
+  border-radius: 14px;
+  padding: 48px 24px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.drop-zone:hover, .drop-zone.dragging {
+  border-color: #6c5ce7;
+  background: rgba(108, 92, 231, 0.05);
+}
+.drop-icon { font-size: 40px; margin-bottom: 12px; }
+.drop-text { font-size: 15px; color: #e4e4ec; }
+.drop-hint { font-size: 12px; color: #9898b0; margin-top: 6px; }
+
+.error-card { border-color: #ff5e5e; }
+.error-card p { color: #ff5e5e; margin-bottom: 12px; }
+
+.info-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.info-item label { display: block; font-size: 12px; color: #9898b0; margin-bottom: 4px; }
+
+.edu-item { padding: 8px 0; border-bottom: 1px solid #2a2a38; font-size: 14px; }
+.edu-item:last-child { border-bottom: none; }
+.edu-date { color: #9898b0; font-size: 12px; margin-left: 8px; }
+
+.tags-wrap { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.proj-item { padding: 10px 0; border-bottom: 1px solid #2a2a38; }
+.proj-item:last-child { border-bottom: none; }
+.proj-desc { font-size: 13px; color: #9898b0; margin-top: 4px; }
+
+.actions { display: flex; gap: 12px; margin-top: 20px; }
+</style>
