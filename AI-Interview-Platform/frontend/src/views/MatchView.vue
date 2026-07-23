@@ -23,6 +23,11 @@
         </button>
       </div>
 
+      <!-- 错误提示 -->
+      <div class="card error-card" v-if="errorMsg">
+        <p style="color: #ff5e5e; font-size: 14px;">{{ errorMsg }}</p>
+      </div>
+
       <!-- 分析结果 -->
       <div v-if="matchResult">
         <div class="card">
@@ -46,7 +51,8 @@
           <div class="tags-wrap" v-if="matchResult.missing.length">
             <span class="tag tag-red" v-for="s in matchResult.missing" :key="s">{{ s }}</span>
           </div>
-          <p v-else style="color: #00d2a0; font-size: 13px;">技能覆盖完整！</p>
+          <p v-else-if="matchResult.matched.length" style="color: #00d2a0; font-size: 13px;">技能覆盖完整！</p>
+          <p v-else style="color: #9898b0; font-size: 13px;">未提取到技能要求，请检查JD内容或后端服务</p>
         </div>
 
         <div class="actions">
@@ -67,6 +73,7 @@ const resumeData = ref(null)
 const jdText = ref('')
 const analyzing = ref(false)
 const matchResult = ref(null)
+const errorMsg = ref('')
 
 onMounted(() => {
   const stored = sessionStorage.getItem('resumeData')
@@ -85,11 +92,16 @@ function useTemplate(key) {
 async function analyze() {
   analyzing.value = true
   matchResult.value = null
+  errorMsg.value = ''
   try {
     const res = await analyzeJD(jdText.value, resumeData.value)
     matchResult.value = res.data.match
   } catch (e) {
-    alert(e.response?.data?.detail || '分析失败')
+    if (!e.response) {
+      errorMsg.value = '无法连接后端服务，请确认已运行 uvicorn main:app --port 8000'
+    } else {
+      errorMsg.value = e.response.data?.detail || '分析失败，请重试'
+    }
   } finally {
     analyzing.value = false
   }
