@@ -31,6 +31,7 @@ class ResumeSchema(BaseModel):
     phone: str = ""
     education: list[EducationItem] = []
     skills: list[str] = []
+    languages: list[str] = []
     experiences: list[ExperienceItem] = []
     projects: list[ProjectItem] = []
 
