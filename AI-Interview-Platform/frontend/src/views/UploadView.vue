@@ -54,8 +54,8 @@
       <div class="card" v-if="resumeData.education && resumeData.education.length">
         <div class="card-title">教育经历</div>
         <div v-for="(edu, i) in resumeData.education" :key="i" class="edu-item">
-          <strong>{{ edu.school }}</strong> · {{ edu.major }} · {{ edu.degree }}
-          <span class="edu-date">{{ edu.start_date }} - {{ edu.end_date }}</span>
+          <strong>{{ edu.school }}</strong><template v-if="edu.major"> · {{ edu.major }}</template><template v-if="edu.degree"> · {{ edu.degree }}</template>
+          <span class="edu-date" v-if="edu.start_date || edu.end_date">{{ edu.start_date }}<template v-if="edu.start_date && edu.end_date"> - </template>{{ edu.end_date }}</span>
         </div>
       </div>
 
@@ -66,12 +66,24 @@
         </div>
       </div>
 
+      <div class="card" v-if="resumeData.experiences && resumeData.experiences.length">
+        <div class="card-title">工作 / 实习经历</div>
+        <div v-for="(exp, i) in resumeData.experiences" :key="i" class="exp-item">
+          <div class="exp-header">
+            <strong>{{ exp.company }}</strong>
+            <span v-if="exp.position" class="exp-pos">{{ exp.position }}</span>
+            <span v-if="exp.duration" class="exp-date">{{ exp.duration }}</span>
+          </div>
+          <p v-if="exp.description" class="exp-desc">{{ exp.description }}</p>
+        </div>
+      </div>
+
       <div class="card" v-if="resumeData.projects && resumeData.projects.length">
         <div class="card-title">项目经历</div>
         <div v-for="(proj, i) in resumeData.projects" :key="i" class="proj-item">
-          <strong>{{ proj.name }}</strong>
-          <span v-if="proj.role"> · {{ proj.role }}</span>
-          <p class="proj-desc">{{ proj.description }}</p>
+          <strong>{{ proj.name }}</strong><span v-if="proj.role"> · {{ proj.role }}</span>
+          <p v-if="proj.description" class="proj-desc">{{ proj.description }}</p>
+          <p v-if="proj.tech_stack" class="proj-tech">技术栈：{{ proj.tech_stack }}</p>
         </div>
       </div>
 
@@ -164,6 +176,7 @@ function goToMatch() {
 
 .info-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .info-item label { display: block; font-size: 12px; color: #9898b0; margin-bottom: 4px; }
+.info-item input { width: 100%; padding: 6px 10px; margin: 0; border: 1px solid #2a2a3e; border-radius: 6px; background: #1a1a2e; color: #e4e4ec; font-size: 14px; box-sizing: border-box; }
 
 .edu-item { padding: 8px 0; border-bottom: 1px solid #2a2a38; font-size: 14px; }
 .edu-item:last-child { border-bottom: none; }
@@ -174,6 +187,14 @@ function goToMatch() {
 .proj-item { padding: 10px 0; border-bottom: 1px solid #2a2a38; }
 .proj-item:last-child { border-bottom: none; }
 .proj-desc { font-size: 13px; color: #9898b0; margin-top: 4px; }
+.proj-tech { font-size: 12px; color: #6c5ce7; margin-top: 4px; }
+
+.exp-item { padding: 10px 0; border-bottom: 1px solid #2a2a38; }
+.exp-item:last-child { border-bottom: none; }
+.exp-header { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.exp-pos { font-size: 13px; color: #e4e4ec; background: #2a2a3e; padding: 2px 8px; border-radius: 4px; }
+.exp-date { font-size: 12px; color: #9898b0; margin-left: auto; }
+.exp-desc { font-size: 13px; color: #9898b0; margin-top: 4px; }
 
 .actions { display: flex; gap: 12px; margin-top: 20px; }
 </style>

@@ -13,7 +13,7 @@
       <div v-for="(msg, i) in messages" :key="i" class="msg" :class="msg.role">
         <div class="msg-bubble">{{ msg.content }}</div>
         <div class="msg-eval" v-if="msg.eval">
-          <span class="eval-score">评分：{{ msg.eval.score }}/5</span>
+          <span class="eval-score">等级：{{ msg.eval.grade }}</span>
           <span class="eval-feedback">{{ msg.eval.feedback }}</span>
         </div>
       </div>

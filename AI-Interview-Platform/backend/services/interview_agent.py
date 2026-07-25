@@ -26,15 +26,21 @@ QUESTION_GEN_PROMPT = """你是一位资深技术面试官。根据以下信息�
 岗位描述：
 {jd_text}
 
-面试历史：
+面试历史（已问过的内容）：
 {history}
 
 当前是第 {round_num}/{max_rounds} 轮。
 
-要求：
-- 第1轮：从简历中的项目经历切入，问一个开放性问题
-- 第2-4轮：基于上一轮回答做追问（深度/压力/盲点/场景 轮换）
-- 第5轮：问一个综合性/行为面试题
+【严格规则】
+1. 绝对不要重复已经问过的问题或相同话题，每一轮必须探索不同维度
+2. 如果候选人回答敷衍或拒绝回答，换一个全新角度，不要追问同一个点
+3. 每轮问题方向必须不同：
+   - 第1轮：从简历项目经历切入（开放性）
+   - 第2轮：针对岗位核心技术栈深挖（技术深度）
+   - 第3轮：压力/假设性问题（"如果...你会怎么做"）
+   - 第4轮：简历盲点或JD中未体现的能力（查漏补缺）
+   - 第5轮：行为面试/团队协作/职业规划（软性素质）
+4. 问题要具体，不要泛泛而谈，结合简历和JD中的具体内容提问
 
 只返回问题本身，不要编号，不要解释。"""
 
@@ -44,8 +50,17 @@ EVALUATE_PROMPT = """你是面试评估专家。请评估候选人的回答质�
 候选人回答：{answer}
 岗位要求：{jd_text}
 
+评分等级（只能选一个）：
+S=完美（超出预期，有深度有细节有思考）
+A=优秀（完整回答，有具体案例）
+B=良好（基本回答到位，缺少部分细节）
+C=合格（有回答但较浅，缺乏具体性）
+D=偏弱（回答过于简略或偏题）
+E=较差（几乎没有有效信息）
+F=完全不合格（拒绝回答或完全无关）
+
 请返回JSON格式：
-{{"score": 1-5的评分, "feedback": "一句话点评（50字内）", "keywords_hit": ["命中的关键词"], "keywords_missed": ["缺失的关键词"]}}"""
+{{"grade": "S/A/B/C/D/E/F中的一个字母", "feedback": "一句话点评（50字内）", "keywords_hit": ["命中的关键词"], "keywords_missed": ["缺失的关键词"]}}"""
 
 REPORT_PROMPT = """你是面试评估专家。根据以下完整面试记录生成综合报告。
 
@@ -55,9 +70,13 @@ REPORT_PROMPT = """你是面试评估专家。根据以下完整面试记录生�
 岗位要求：
 {jd_text}
 
+综合等级（只能选一个）：
+S=完美, A=优秀, B=良好, C=合格, D=偏弱, E=较差, F=完全不合格
+C及以上为合格。
+
 请返回JSON格式：
 {{
-  "total_score": 1-5综合评分,
+  "total_grade": "S/A/B/C/D/E/F中的一个字母",
   "strengths": ["优势1", "优势2", "优势3"],
   "improvements": ["改进建议1", "改进建议2", "改进建议3"],
   "summary": "100字以内的综合评价"
@@ -95,7 +114,7 @@ def generate_question(state: InterviewState) -> dict:
     """问题生成节点"""
     history_text = "\n".join(
         f"{'面试官' if m['role'] == 'assistant' else '候选人'}: {m['content']}"
-        for m in state["history"][-6:]  # 最近3轮对话
+        for m in state["history"]  # 全部历史，避免重复提问
     ) or "（首轮，无历史）"
 
     prompt = QUESTION_GEN_PROMPT.format(
@@ -120,13 +139,21 @@ def evaluate_answer(state: InterviewState) -> dict:
         result = llm_json.invoke(prompt)
         eval_data = json.loads(result.content)
     except Exception:
-        eval_data = {"score": 3.0, "feedback": "回答基本完整", "keywords_hit": [], "keywords_missed": []}
+        eval_data = {"grade": "C", "feedback": "回答基本完整", "keywords_hit": [], "keywords_missed": []}
+
+    # 兼容：如果LLM返回了score而非grade，做转换
+    grade = eval_data.get("grade", "")
+    if not grade and "score" in eval_data:
+        score_map = {5: "S", 4: "A", 3: "B", 2: "D", 1: "E"}
+        grade = score_map.get(int(eval_data["score"]), "C")
+    if grade not in "SABCDEF":
+        grade = "C"
 
     round_record = {
         "round_num": state["round_num"],
         "question": state["current_question"],
         "answer": state["current_answer"],
-        "score": eval_data.get("score", 3.0),
+        "grade": grade,
         "feedback": eval_data.get("feedback", ""),
     }
     new_rounds = state["rounds"] + [round_record]
@@ -140,18 +167,22 @@ def evaluate_answer(state: InterviewState) -> dict:
 def generate_report(state: InterviewState) -> dict:
     """报告生成节点"""
     rounds_text = "\n".join(
-        f"第{r['round_num']}轮 - 问：{r['question']}\n答：{r['answer']}\n评分：{r['score']}"
+        f"第{r['round_num']}轮 - 问：{r['question']}\n答：{r['answer']}\n等级：{r.get('grade', 'C')}"
         for r in state["rounds"]
     )
     prompt = REPORT_PROMPT.format(rounds_text=rounds_text, jd_text=state["jd_text"] or "通用技术岗")
     try:
         result = llm_json.invoke(prompt)
         report = json.loads(result.content)
+        if report.get("total_grade") not in "SABCDEF":
+            raise ValueError("无效等级")
     except Exception:
-        scores = [r["score"] for r in state["rounds"]]
-        avg = sum(scores) / len(scores) if scores else 3.0
+        # 兜底：根据各轮等级取众数
+        grades = [r.get("grade", "C") for r in state["rounds"]]
+        grade_order = "SABCDEF"
+        avg_idx = sum(grade_order.index(g) for g in grades) // len(grades) if grades else 2
         report = {
-            "total_score": round(avg, 1),
+            "total_grade": grade_order[avg_idx],
             "strengths": ["完成全部面试轮次"],
             "improvements": ["建议补充更多项目细节", "注意量化成果"],
             "summary": "面试完成，整体表现中等，建议加强项目经验的深度表达。",

@@ -48,12 +48,12 @@ class InterviewRound(BaseModel):
     round_num: int
     question: str
     answer: str = ""
-    score: float = 0.0
+    grade: str = "C"  # S/A/B/C/D/E/F
     feedback: str = ""
 
 
 class InterviewReport(BaseModel):
-    total_score: float = Field(ge=1, le=5)
+    total_grade: str = "C"  # S/A/B/C/D/E/F，C及以上合格
     rounds: list[InterviewRound] = []
     strengths: list[str] = []
     improvements: list[str] = []

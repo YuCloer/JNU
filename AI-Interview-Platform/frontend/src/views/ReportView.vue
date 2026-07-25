@@ -8,8 +8,8 @@
       <!-- 综合评分 -->
       <div class="card score-card">
         <div class="score-circle">
-          <span class="score-num">{{ report.total_score }}</span>
-          <span class="score-max">/ 5</span>
+          <span class="score-num" :class="gradeClass(report.total_grade)">{{ report.total_grade }}</span>
+          <span class="score-max">{{ gradeLabel(report.total_grade) }}</span>
         </div>
         <p class="score-summary">{{ report.summary }}</p>
       </div>
@@ -36,7 +36,7 @@
         <div v-for="(r, i) in rounds" :key="i" class="round-item">
           <div class="round-header" @click="r.expanded = !r.expanded">
             <span class="round-num">第 {{ i + 1 }} 题</span>
-            <span class="round-score" :class="scoreClass(r.score)">{{ r.score }}/5</span>
+            <span class="round-score" :class="gradeClass(r.grade)">{{ r.grade }}</span>
             <span class="expand-icon">{{ r.expanded ? '▼' : '▶' }}</span>
           </div>
           <div class="round-detail" v-if="r.expanded">
@@ -94,10 +94,15 @@ onMounted(async () => {
   }
 })
 
-function scoreClass(score) {
-  if (score >= 4) return 'high'
-  if (score >= 3) return 'mid'
+function gradeClass(grade) {
+  if ('SAB'.includes(grade)) return 'high'
+  if (grade === 'C') return 'mid'
   return 'low'
+}
+
+function gradeLabel(grade) {
+  const labels = { S: '完美', A: '优秀', B: '良好', C: '合格', D: '偏弱', E: '较差', F: '不合格' }
+  return labels[grade] || ''
 }
 
 function retry() {

@@ -2,7 +2,7 @@
 from fastapi import APIRouter, HTTPException
 
 from schemas import JDAnalyzeRequest
-from services.jd_matcher import extract_jd_skills, match_skills
+from services.jd_matcher import extract_jd_skills, match_position
 
 router = APIRouter()
 
@@ -69,11 +69,11 @@ async def analyze_jd(request: JDAnalyzeRequest):
     # 提取JD技能
     jd_skills = extract_jd_skills(jd_text)
 
-    # 获取简历技能
-    resume_skills = request.resume_data.get("skills", [])
+    # 从简历全部字段提取能力标签（不只是skills数组）
+    resume_skills = _build_resume_capabilities(request.resume_data)
 
-    # 计算匹配度
-    match_result = match_skills(resume_skills, jd_skills)
+    # 岗位匹配度（学历20% + 技能50% + 经验30%）
+    match_result = match_position(request.resume_data, resume_skills, jd_skills, jd_text)
 
     return {
         "status": "ok",
@@ -81,3 +81,64 @@ async def analyze_jd(request: JDAnalyzeRequest):
         "resume_skills": resume_skills,
         "match": match_result,
     }
+
+
+def _build_resume_capabilities(resume_data: dict) -> list[str]:
+    """从简历全部字段提取能力标签，不只是skills数组"""
+    caps = []
+
+    # 1. 显式技能栏
+    caps.extend(resume_data.get("skills", []))
+
+    # 2. 教育背景 → 学历本身就是一种资质
+    for edu in resume_data.get("education", []):
+        degree = edu.get("degree", "")
+        if "本科" in degree or "学士" in degree:
+            caps.append("本科学历")
+        elif "硕士" in degree or "研究生" in degree:
+            caps.append("硕士学历")
+        major = edu.get("major", "")
+        if major:
+            caps.append(major)
+
+    # 3. 项目经历 → 从tech_stack和description中提取工具/方法
+    for proj in resume_data.get("projects", []):
+        tech = proj.get("tech_stack", "")
+        if tech:
+            # tech_stack可能是逗号分隔的字符串
+            for t in tech.replace("、", ",").replace("/", ",").split(","):
+                t = t.strip()
+                if t and len(t) <= 15:
+                    caps.append(t)
+        desc = proj.get("description", "")
+        # 从项目描述中推断隐含能力
+        if any(kw in desc for kw in ["AI", "ai", "模型", "LLM", "大模型", "Ollama", "LangChain"]):
+            caps.append("AI工具应用")
+        if any(kw in desc for kw in ["数据", "分析", "统计", "可视化"]):
+            caps.append("数据分析")
+        if any(kw in desc for kw in ["Git", "git", "GitHub", "版本控制"]):
+            caps.append("Git")
+        if any(kw in desc for kw in ["API", "接口", "后端", "FastAPI", "Flask"]):
+            caps.append("API开发")
+        if any(kw in desc for kw in ["文档", "README", "说明"]):
+            caps.append("文档撰写")
+
+    # 4. 工作/实习经历
+    for exp in resume_data.get("experiences", []):
+        desc = exp.get("description", "")
+        if any(kw in desc for kw in ["数据", "分析", "报表"]):
+            caps.append("数据分析")
+        if any(kw in desc for kw in ["策划", "活动", "运营"]):
+            caps.append("活动策划")
+        if any(kw in desc for kw in ["团队", "协作", "跨部门"]):
+            caps.append("团队协作")
+
+    # 去重（不区分大小写）
+    seen = set()
+    unique = []
+    for c in caps:
+        key = c.lower().strip()
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(c.strip())
+    return unique
