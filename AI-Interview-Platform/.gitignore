@@ -1,7 +1,14 @@
+# Local helpers (contains API keys / push scripts / internal docs)
+Start.txt
+push.bat
+exclude.txt
+HANDOFF.md
+cleanup.bat
+
 # Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*.egg-info/
 .venv/
 venv/
 
@@ -12,12 +19,11 @@ dist/
 # IDE
 .idea/
 .vscode/
-*.swp
+
+# Environment
+.env
+*.local
 
 # OS
-.DS_Store
 Thumbs.db
-
-# 环境
-.env
-*.log
+.DS_Store
