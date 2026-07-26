@@ -66,6 +66,13 @@
         </div>
       </div>
 
+      <div class="card" v-if="resumeData.languages && resumeData.languages.length">
+        <div class="card-title">语言能力</div>
+        <div class="tags-wrap">
+          <span class="tag tag-lang" v-for="(lang, i) in resumeData.languages" :key="i">{{ lang }}</span>
+        </div>
+      </div>
+
       <div class="card" v-if="resumeData.experiences && resumeData.experiences.length">
         <div class="card-title">工作 / 实习经历</div>
         <div v-for="(exp, i) in resumeData.experiences" :key="i" class="exp-item">
@@ -183,6 +190,7 @@ function goToMatch() {
 .edu-date { color: #9898b0; font-size: 12px; margin-left: 8px; }
 
 .tags-wrap { display: flex; flex-wrap: wrap; gap: 6px; }
+.tag-lang { background: rgba(0, 210, 160, 0.12); color: #00d2a0; }
 
 .proj-item { padding: 10px 0; border-bottom: 1px solid #2a2a38; }
 .proj-item:last-child { border-bottom: none; }

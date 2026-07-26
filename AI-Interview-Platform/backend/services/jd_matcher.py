@@ -2,9 +2,7 @@
 import json
 import re
 
-from langchain_ollama import ChatOllama
-
-llm_json = ChatOllama(model="qwen2.5:3b", format="json", temperature=0.3)
+from services.llm_client import llm_json
 
 JD_SKILLS_PROMPT = """从JD提取技能要求，返回JSON。
 
@@ -163,7 +161,72 @@ def extract_jd_skills(jd_text: str) -> dict:
     if not merged["technical"]:
         merged["technical"] = rule_skills.get("technical", [])
 
+    # 修正3B模型分类错误：把明显的软素质词从technical移到soft
+    _SOFT_RECLASSIFY = re.compile(
+        r"^(逻辑思维|表达能力|沟通能力|自驱力|抗压|责任心|领导力|团队协作|"
+        r"团队合作|快速学习|目标导向|时间管理|跨部门协作|产品体验优化|"
+        r"技术概念理解|数据敏感度|学习能力|执行力|主动性|耐心|细心)$"
+    )
+    reclassified = []
+    for s in merged["technical"]:
+        if _SOFT_RECLASSIFY.match(s.strip()):
+            if s not in merged["soft"]:
+                merged["soft"].append(s)
+            reclassified.append(s)
+    for s in reclassified:
+        merged["technical"].remove(s)
+
+    # 合并"至少一种"类的或选技能（Python/Java/Go 至少一种 → 单个 "Python/Java/Go"）
+    merged["technical"] = _merge_alternative_skills(merged["technical"], jd_text)
+
     return merged
+
+
+def _merge_alternative_skills(skills: list[str], jd_text: str) -> list[str]:
+    """检测JD中"至少一种/任一"表述，将或选技能合并为单个 A/B/C 项。
+    合并后匹配逻辑只需命中其中一个即算匹配。"""
+    # 匹配模式：X/Y/Z 至少一种 | X、Y、Z 任选其一 | 熟悉 X 或 Y | X or Y (at least one)
+    alt_patterns = [
+        # "Python/Java/Go 至少一种"
+        r"([\w+#./、]+(?:[/、][\w+#.]+)+)\s*(?:至少一种|任选其一|其中之一|任一)",
+        # "至少一种语言" 前面列举的（如 "熟悉 Python/Java/Go 至少一种语言"）
+        r"([\w+#.]+(?:[/、][\w+#.]+)+)\s*(?:至少|任选|其一)",
+        # "X 或 Y 或 Z"（中文"或"连接）
+        r"([\w+#.]+(?:\s*或\s*[\w+#.]+)+)",
+    ]
+
+    # 收集所有或选组
+    or_groups = []  # 每组是一个 set of skill names (lowercase)
+    for pat in alt_patterns:
+        for m in re.finditer(pat, jd_text):
+            fragment = m.group(1)
+            # 拆分出各个技能名
+            parts = re.split(r"[/、\s]*或\s*|[/、]+", fragment)
+            parts = [p.strip() for p in parts if p.strip()]
+            if len(parts) >= 2:
+                or_groups.append({p.lower() for p in parts})
+
+    if not or_groups:
+        return skills
+
+    # 对每个或选组，找出 skills 中属于该组的项，合并为一个
+    result = list(skills)
+    for group in or_groups:
+        # 找当前 skills 中哪些属于这个或选组
+        matched_in_group = []
+        for s in result:
+            s_lower = s.lower().strip()
+            if s_lower in group or any(g in s_lower or s_lower in g for g in group):
+                matched_in_group.append(s)
+        if len(matched_in_group) >= 2:
+            # 合并为 "A/B/C" 形式，从 result 中移除原始项
+            merged_label = "/".join(matched_in_group)
+            for s in matched_in_group:
+                if s in result:
+                    result.remove(s)
+            result.append(merged_label)
+
+    return result
 
 
 def _keyword_fallback(jd_text: str) -> dict:
@@ -223,6 +286,7 @@ def match_position(resume_data: dict, resume_skills: list[str], jd_skills: dict,
 
     return {
         "match_rate": round(overall * 100, 1),
+        "dimension_weights": {"education": 0.2, "skills": 0.5, "experience": 0.3},
         "dimensions": {
             "education": edu_result,
             "skills": {
@@ -356,34 +420,83 @@ def _match_education(resume_data: dict, jd_text: str) -> dict:
 
 
 def _match_experience(resume_data: dict, jd_text: str) -> dict:
-    """经验/项目相关性维度"""
-    # 从JD提取关键业务词
+    """经验/项目相关性维度：三层评估"""
+    experiences = resume_data.get("experiences", [])
+    projects = resume_data.get("projects", [])
+    details = []
+    score_parts = []
+
+    # ===== 第一层：JD是否要求实习/项目经验，候选人是否有 =====
+    jd_wants_internship = bool(re.search(r"实习|intern|实践经[历验]", jd_text, re.IGNORECASE))
+    jd_wants_projects = bool(re.search(r"项目经[历验]|项目经验|project", jd_text, re.IGNORECASE))
+
+    has_internship = len(experiences) > 0
+    has_projects = len(projects) > 0
+
+    if jd_wants_internship or jd_wants_projects:
+        if jd_wants_internship and has_internship:
+            score_parts.append(1.0)
+            details.append(f"要求实习经历，简历有{len(experiences)}段实习")
+        elif jd_wants_internship and not has_internship:
+            score_parts.append(0.2)
+            details.append("要求实习经历，简历无实习")
+        if jd_wants_projects and has_projects:
+            score_parts.append(1.0)
+            details.append(f"要求项目经验，简历有{len(projects)}个项目")
+        elif jd_wants_projects and not has_projects:
+            score_parts.append(0.2)
+            details.append("要求项目经验，简历无项目")
+    else:
+        # JD没明确要求，但有实习/项目仍加分
+        if has_internship or has_projects:
+            score_parts.append(0.8)
+            details.append(f"JD未明确要求，简历有{len(experiences)}段实习+{len(projects)}个项目")
+        else:
+            score_parts.append(0.4)
+            details.append("JD未明确要求，简历也无实习/项目")
+
+    # ===== 第二层：JD职责关键词 vs 简历经历描述 =====
+    # 从JD提取职责/业务关键词（动态提取，非写死列表）
     jd_keywords = set()
+    # 通用行业/职能词
     biz_patterns = [
         r"游戏", r"运营", r"发行", r"电商", r"金融", r"教育",
         r"数据", r"AI", r"用户", r"产品", r"增长", r"营销",
+        r"后端", r"前端", r"架构", r"测试", r"安全", r"嵌入式",
+        r"设计", r"需求", r"协作", r"管理", r"分析",
     ]
     for p in biz_patterns:
         if re.search(p, jd_text):
             jd_keywords.add(p.strip("r\""))
 
-    if not jd_keywords:
-        return {"score": 0.5, "detail": "JD无明确行业要求", "hits": []}
-
     # 在简历项目+经历中查找命中
     resume_text = ""
-    for proj in resume_data.get("projects", []):
+    for proj in projects:
         resume_text += proj.get("name", "") + proj.get("description", "") + proj.get("tech_stack", "")
-    for exp in resume_data.get("experiences", []):
+    for exp in experiences:
         resume_text += exp.get("company", "") + exp.get("position", "") + exp.get("description", "")
 
-    hits = []
-    for kw in jd_keywords:
-        if kw.lower() in resume_text.lower():
-            hits.append(kw)
+    if jd_keywords:
+        hits = [kw for kw in jd_keywords if kw.lower() in resume_text.lower()]
+        kw_score = len(hits) / len(jd_keywords)
+        score_parts.append(kw_score)
+        details.append(f"行业关键词命中{len(hits)}/{len(jd_keywords)}: {','.join(hits[:5])}")
+    else:
+        details.append("JD无明确行业关键词")
 
-    score = len(hits) / len(jd_keywords) if jd_keywords else 0.5
-    return {"score": round(score, 2), "detail": f"命中{len(hits)}/{len(jd_keywords)}个行业关键词", "hits": hits}
+    # ===== 第三层：经历数量加分（有实质内容 > 空白） =====
+    total_exp = len(experiences) + len(projects)
+    if total_exp >= 3:
+        score_parts.append(1.0)
+    elif total_exp >= 2:
+        score_parts.append(0.8)
+    elif total_exp >= 1:
+        score_parts.append(0.6)
+    else:
+        score_parts.append(0.2)
+
+    final_score = round(sum(score_parts) / len(score_parts), 2) if score_parts else 0.5
+    return {"score": final_score, "detail": "；".join(details), "hits": list(jd_keywords) if jd_keywords else []}
 
 
 # 保留旧接口兼容

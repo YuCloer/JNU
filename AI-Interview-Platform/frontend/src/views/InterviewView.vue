@@ -16,6 +16,11 @@
           <span class="eval-score">等级：{{ msg.eval.grade }}</span>
           <span class="eval-feedback">{{ msg.eval.feedback }}</span>
         </div>
+        <button
+          v-if="msg.role === 'user' && i === lastUserIndex && !streaming"
+          class="re-edit-btn"
+          @click="reEdit(i)"
+        >重新编辑</button>
       </div>
       <div v-if="streaming" class="msg assistant">
         <div class="msg-bubble typing">{{ streamingText }}<span class="cursor">|</span></div>
@@ -47,7 +52,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick } from 'vue'
+import { ref, computed, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { startInterviewSSE, interviewChatSSE } from '../api'
 
@@ -62,8 +67,16 @@ const waitingFirst = ref(true)
 const chatArea = ref(null)
 const history = ref([])
 
+const lastUserIndex = computed(() => {
+  for (let i = messages.value.length - 1; i >= 0; i--) {
+    if (messages.value[i].role === 'user') return i
+  }
+  return -1
+})
+
 let resumeData = null
 let jdText = ''
+const evaluatedRounds = []  // 收集每轮评估结果，report时直接传给后端
 
 onMounted(async () => {
   resumeData = JSON.parse(sessionStorage.getItem('resumeData') || 'null')
@@ -81,19 +94,29 @@ onMounted(async () => {
     const reader = response.body.getReader()
     const decoder = new TextDecoder()
     let question = ''
+    let buffer = ''
 
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-      const text = decoder.decode(value)
-      const lines = text.split('\n')
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop()  // 最后一行可能不完整，留到下次
       for (const line of lines) {
         if (line.startsWith('data: ')) {
-          const data = JSON.parse(line.slice(6))
-          if (data.token) {
-            question += data.token
-            streamingText.value = question
-          }
+          try {
+            const data = JSON.parse(line.slice(6))
+            if (data.error) {
+              messages.value.push({ role: 'assistant', content: '⚠️ ' + data.error })
+              streaming.value = false
+              waitingFirst.value = false
+              return
+            }
+            if (data.token) {
+              question += data.token
+              streamingText.value = question
+            }
+          } catch (_) { /* 忽略不完整JSON */ }
         }
       }
     }
@@ -135,26 +158,40 @@ async function sendAnswer() {
     const decoder = new TextDecoder()
     let question = ''
     let evalData = null
+    let buffer = ''
 
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-      const text = decoder.decode(value)
-      const lines = text.split('\n')
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop()
       for (const line of lines) {
         if (line.startsWith('data: ')) {
-          const data = JSON.parse(line.slice(6))
-          if (data.type === 'eval') {
-            evalData = data.data
-            // 给最后一条用户消息附加评估
-            const lastUserMsg = [...messages.value].reverse().find(m => m.role === 'user')
-            if (lastUserMsg) lastUserMsg.eval = evalData
-          } else if (data.type === 'token') {
-            question += data.token
-            streamingText.value = question
-          } else if (data.type === 'end') {
-            finished.value = true
-          }
+          try {
+            const data = JSON.parse(line.slice(6))
+            if (data.type === 'eval') {
+              evalData = data.data
+              const lastUserMsg = [...messages.value].reverse().find(m => m.role === 'user')
+              if (lastUserMsg) lastUserMsg.eval = evalData
+              // 收集该轮评估结果，report时复用
+              const lastQuestion = [...history.value].reverse().find(m => m.role === 'assistant')
+              evaluatedRounds.push({
+                round_num: currentRound.value,
+                question: lastQuestion?.content || '',
+                answer: answer,
+                grade: evalData.grade || 'C',
+                feedback: evalData.feedback || '',
+              })
+            } else if (data.type === 'token') {
+              question += data.token
+              streamingText.value = question
+            } else if (data.type === 'end') {
+              finished.value = true
+            } else if (data.error) {
+              messages.value.push({ role: 'assistant', content: '⚠️ ' + data.error })
+            }
+          } catch (_) { /* 忽略不完整JSON */ }
         }
       }
     }
@@ -179,9 +216,25 @@ function scrollToBottom() {
   })
 }
 
+function reEdit(index) {
+  // 取回用户输入
+  userInput.value = messages.value[index].content
+  // 截断该条及之后的所有消息
+  messages.value = messages.value.slice(0, index)
+  // history 同步截断（history与messages一一对应）
+  history.value = history.value.slice(0, index)
+  // 移除对应的评估记录
+  if (evaluatedRounds.length) evaluatedRounds.pop()
+  // 回退轮次
+  if (currentRound.value > 1) currentRound.value--
+  finished.value = false
+  scrollToBottom()
+}
+
 function viewReport() {
   sessionStorage.setItem('interviewHistory', JSON.stringify(history.value))
   sessionStorage.setItem('interviewJd', jdText)
+  sessionStorage.setItem('interviewRounds', JSON.stringify(evaluatedRounds))
   router.push('/report')
 }
 </script>
@@ -263,4 +316,17 @@ function viewReport() {
 }
 .input-area textarea { flex: 1; }
 .input-area .btn { height: fit-content; white-space: nowrap; }
+
+.re-edit-btn {
+  margin-top: 4px;
+  font-size: 11px;
+  color: #9898b0;
+  background: none;
+  border: 1px solid #3a3a4e;
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+}
+.re-edit-btn:hover { color: #6c5ce7; border-color: #6c5ce7; }
 </style>

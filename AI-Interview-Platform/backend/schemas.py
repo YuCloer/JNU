@@ -43,6 +43,7 @@ class InterviewRequest(BaseModel):
     round_num: int = 1
     history: list[dict] = []  # [{"role": "user"/"assistant", "content": "..."}]
     user_answer: str = ""
+    rounds: list[dict] = []  # 已评估的轮次（chat时产生），report接口直接复用避免重复LLM调用
 
 
 class InterviewRound(BaseModel):

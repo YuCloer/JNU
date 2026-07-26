@@ -65,7 +65,7 @@
             <div class="dim-item">
               <div class="dim-header">
                 <span class="dim-name">学历匹配</span>
-                <span class="dim-weight">权重 20%</span>
+                <span class="dim-weight">权重 {{ (matchResult.dimension_weights?.education ?? 0.2) * 100 }}%</span>
                 <span class="dim-score">{{ Math.round(matchResult.dimensions.education.score * 100) }}%</span>
               </div>
               <div class="dim-bar"><div class="dim-fill" :style="{width: matchResult.dimensions.education.score * 100 + '%'}"></div></div>
@@ -74,7 +74,7 @@
             <div class="dim-item">
               <div class="dim-header">
                 <span class="dim-name">技能匹配</span>
-                <span class="dim-weight">权重 50%</span>
+                <span class="dim-weight">权重 {{ (matchResult.dimension_weights?.skills ?? 0.5) * 100 }}%</span>
                 <span class="dim-score">{{ matchResult.dimensions.skills.rate }}%</span>
               </div>
               <div class="dim-bar"><div class="dim-fill" :style="{width: matchResult.dimensions.skills.rate + '%'}"></div></div>
@@ -83,7 +83,7 @@
             <div class="dim-item">
               <div class="dim-header">
                 <span class="dim-name">经验相关性</span>
-                <span class="dim-weight">权重 30%</span>
+                <span class="dim-weight">权重 {{ (matchResult.dimension_weights?.experience ?? 0.3) * 100 }}%</span>
                 <span class="dim-score">{{ Math.round(matchResult.dimensions.experience.score * 100) }}%</span>
               </div>
               <div class="dim-bar"><div class="dim-fill" :style="{width: matchResult.dimensions.experience.score * 100 + '%'}"></div></div>
@@ -95,7 +95,9 @@
         <div class="card">
           <div class="card-title">已匹配技能</div>
           <div class="tags-wrap" v-if="matchResult.matched.length">
-            <span class="tag tag-green" v-for="s in matchResult.matched" :key="s">{{ s }}</span>
+            <span class="tag tag-green" v-for="s in matchResult.matched" :key="s">
+              {{ s }}<sup class="weight-num" v-if="matchResult.dimensions?.skills?.weights?.[s]">×{{ matchResult.dimensions.skills.weights[s] }}</sup>
+            </span>
           </div>
           <p v-else style="color: #9898b0; font-size: 13px;">暂无匹配项</p>
         </div>
@@ -103,7 +105,9 @@
         <div class="card">
           <div class="card-title">缺失技术技能（需补强）</div>
           <div class="tags-wrap" v-if="matchResult.missing.length">
-            <span class="tag tag-red" v-for="s in matchResult.missing" :key="s">{{ s }}</span>
+            <span class="tag tag-red" v-for="s in matchResult.missing" :key="s">
+              {{ s }}<sup class="weight-num" v-if="matchResult.dimensions?.skills?.weights?.[s]">×{{ matchResult.dimensions.skills.weights[s] }}</sup>
+            </span>
           </div>
           <p v-else-if="matchResult.matched.length" style="color: #00d2a0; font-size: 13px;">技术技能覆盖完整！</p>
           <p v-else style="color: #9898b0; font-size: 13px;">未提取到技能要求，请检查JD内容或后端服务</p>
@@ -195,4 +199,5 @@ function startInterview() {
 .dim-bar { height: 6px; background: #2a2a3e; border-radius: 3px; overflow: hidden; }
 .dim-fill { height: 100%; background: linear-gradient(90deg, #6c5ce7, #00d2a0); border-radius: 3px; transition: width 0.6s ease; }
 .dim-detail { font-size: 12px; color: #9898b0; margin-top: 4px; }
+.weight-num { font-size: 10px; color: #f0a040; margin-left: 2px; opacity: 0.85; }
 </style>

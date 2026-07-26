@@ -1,4 +1,6 @@
 """简历解析路由"""
+import asyncio
+
 from fastapi import APIRouter, UploadFile, File, HTTPException
 
 from services.resume_parser import extract_text_from_file, extract_resume
@@ -26,5 +28,14 @@ async def parse_resume(file: UploadFile = File(...)):
     if not raw_text.strip():
         raise HTTPException(status_code=422, detail="未能从文件中提取到文本内容")
 
-    resume_data = extract_resume(raw_text)
+    try:
+        resume_data = await asyncio.wait_for(
+            asyncio.to_thread(extract_resume, raw_text),
+            timeout=60,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="AI 解析超时，请确认 Ollama 服务正常运行后重试")
+    except Exception:
+        raise HTTPException(status_code=500, detail="AI 解析异常，请重试")
+
     return {"status": "ok", "data": resume_data, "raw_text_length": len(raw_text)}

@@ -2,12 +2,10 @@
 import json
 import re
 
-from langchain_ollama import ChatOllama
 from pydantic import ValidationError
 
 from schemas import ResumeSchema
-
-llm_json = ChatOllama(model="qwen2.5:3b", format="json", temperature=0.1)
+from services.llm_client import llm_json_strict as llm_json
 
 # ===== 极简 prompt（3B模型只能跟住短指令）=====
 
@@ -173,10 +171,30 @@ def _sanitize_llm_output(data: dict) -> dict:
     if "education" in data and isinstance(data["education"], list):
         for edu in data["education"]:
             if isinstance(edu, dict):
-                # end_date 不应该是非日期文本
+                # start_date: 只保留年份部分，去掉"至今"等后缀
+                sd = edu.get("start_date", "")
+                if sd:
+                    ym = re.search(r"(20\d{2})[./\-年]?(\d{1,2})?", sd)
+                    if ym:
+                        edu["start_date"] = ym.group(1) + ("." + ym.group(2).zfill(2) if ym.group(2) else "")
+                    elif not re.search(r"20\d{2}", sd):
+                        edu["start_date"] = ""
+                # end_date: 规范化
                 ed = edu.get("end_date", "")
-                if ed and not re.search(r"20\d{2}", ed):
-                    edu["end_date"] = ""
+                if ed:
+                    if re.search(r"至今|在读|present|今|now", ed, re.IGNORECASE):
+                        edu["end_date"] = "至今"
+                    else:
+                        ym = re.search(r"(20\d{2})\s*届?", ed)
+                        if ym:
+                            # "2027 届" → "2027"，"2025.06" → "2025.06"
+                            full = re.search(r"(20\d{2})[./\-年](\d{1,2})", ed)
+                            if full:
+                                edu["end_date"] = full.group(1) + "." + full.group(2).zfill(2)
+                            else:
+                                edu["end_date"] = ym.group(1)
+                        else:
+                            edu["end_date"] = ""
 
     # experiences: 模型可能输出 internships 而非 experiences
     if "internships" in data and "experiences" not in data:
@@ -186,7 +204,21 @@ def _sanitize_llm_output(data: dict) -> dict:
     if "projects" in data and isinstance(data["projects"], list):
         for proj in data["projects"]:
             if isinstance(proj, dict) and isinstance(proj.get("tech_stack"), list):
-                proj["tech_stack"] = ", ".join(proj["tech_stack"])
+                # 3B模型可能输出 [{"name":"Python"}] 而非 ["Python"]
+                fixed_ts = []
+                for ts_item in proj["tech_stack"]:
+                    if isinstance(ts_item, str):
+                        fixed_ts.append(ts_item)
+                    elif isinstance(ts_item, dict):
+                        name = ts_item.get("name", "") or ts_item.get("tech", "")
+                        if name:
+                            fixed_ts.append(name)
+                proj["tech_stack"] = ", ".join(fixed_ts)
+            # role 字段不应包含GitHub路径或斜杠路径
+            if isinstance(proj, dict):
+                role = proj.get("role", "")
+                if role and re.search(r"github\.com|/[\w-]+/[\w-]+|^[\w-]+/[\w-]+/[\w-]+$", role):
+                    proj["role"] = ""
 
     # skills: 模型可能输出 [{name, level}] 而非 ["Python", "SQL"]
     if "skills" in data and isinstance(data["skills"], list):
@@ -282,6 +314,9 @@ def extract_resume(raw_text: str) -> dict:
         if s not in parsed["skills"]:
             parsed["skills"].append(s)
 
+    # 合并相似技能（用/隔开）
+    parsed["skills"] = _merge_similar_skills(parsed["skills"])
+
     # 经历：LLM没提取到就用正则补
     if not parsed.get("experiences"):
         parsed["experiences"] = _regex_experiences(cleaned)
@@ -364,7 +399,26 @@ def _clean_github_links(text: str) -> str:
             continue
         result.append(lines[i])
         i += 1
-    return "\n".join(result)
+
+    # 第二遍：处理散落在其他位置的 github.com URL 格式
+    # 将 "https://github.com/user/repo" 或 "github.com/user/repo" 标记为仓库链接
+    # 也处理纯 "User/Repo" 或 "User/Org/Repo" 格式（侧边栏常见）
+    final = []
+    for line in result:
+        stripped = line.strip()
+        m = re.match(r"^(?:https?://)?github\.com/([\w.-]+/[\w.-]+(?:/[\w.-]+)?)/?\s*$", stripped)
+        if m:
+            final.append(f"  仓库: {m.group(1)}")
+        elif re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?", stripped) and not stripped.startswith("/"):
+            # 纯 User/Repo 或 User/Org/Repo 格式（排除文件路径如 src/main）
+            parts = stripped.split("/")
+            if all(p[0].isupper() or p[0].isdigit() for p in parts) or any(c.isupper() for c in stripped):
+                final.append(f"  仓库: {stripped}")
+            else:
+                final.append(line)
+        else:
+            final.append(line)
+    return "\n".join(final)
 
 
 def _reassemble_courses(text: str) -> str:
@@ -860,9 +914,12 @@ def _regex_skills(text: str) -> list[str]:
             tech_section_lines = 0
             continue
         if in_tech_section:
-            # 遇到下一个段落标题就停
-            if re.match(r"^(?:教育|工作|实习|项目|自我|语言|培训|开源)", stripped) and len(stripped) < 10:
+            # 遇到下一个段落标题就停（允许标题带括号注释，如"开源项目（GitHub仓库）"）
+            if re.match(r"^(?:教育|工作|实习|项目|自我|语言|培训|开源|基本|期望|荣誉)", stripped) and len(stripped) < 25:
                 in_tech_section = False
+                continue
+            # 跳过"仓库:"行（GitHub仓库路径，不是技能）
+            if re.match(r"^\s*仓库", stripped) or "/" in stripped and re.search(r"[A-Z][a-z]+/[A-Z]", stripped):
                 continue
             if not stripped:
                 continue
@@ -928,6 +985,9 @@ _SKILL_BLACKLIST_PATTERNS = [
     r"故障|排查|⼯单|响应|解决时间",  # 工作描述
     r"运营维护|技术支持|技术⽀持",  # 岗位描述
     r"项[⽬目]经[历验]|教育[背经][景历]|实习经[历验]|⾃我评价|语[⾔言]能[⼒力]|开源项[⽬目]|培训经[历验]",  # 段落标题
+    r"仓库|GitHub|github",  # GitHub仓库相关
+    r"^[\w-]+/[\w-]+",   # 路径格式（User/Repo）
+    r"Watcher|Cloer|JNU",  # 仓库路径碎片
 ]
 
 # 已知的中文技术词白名单（纯汉字但确实是技能）
@@ -993,6 +1053,66 @@ def _filter_skills(skills: list[str]) -> list[str]:
         # 其他情况（混合中英文等）：只保留短的
         if len(s) <= 8 and s not in result:
             result.append(s)
+    return result
+
+
+# ===== 相似技能合并 =====
+
+# 技能合并组（有序列表）：同一组内的技能如果出现多个，合并为 "A/B/C" 形式
+_SKILL_MERGE_GROUPS = [
+    ["Vue", "Vue3", "Vue2"],
+    ["SQL", "MySQL", "PostgreSQL", "SQLite"],
+    ["LangChain", "LangGraph"],
+    ["React", "React Native"],
+    ["JavaScript", "TypeScript", "JS", "TS"],
+    ["Kubernetes", "K8s"],
+    ["Node.js", "Node"],
+    ["PyTorch", "TensorFlow"],
+    ["HTML", "CSS"],
+    ["C", "C++", "C#"],
+    ["机器学习", "深度学习"],
+    ["NLP", "自然语言处理"],
+    ["CV", "计算机视觉"],
+    ["LLM", "GPT"],
+    ["Chroma", "ChromaDB"],
+    ["数据分析", "数据挖掘"],
+    ["微信小程序", "uni-app"],
+]
+
+
+def _merge_similar_skills(skills: list[str]) -> list[str]:
+    """将相似/同族技能合并为 A/B 形式，减少冗余标签"""
+    # 建立 lowercase → 原始名 映射
+    lower_map = {}
+    for s in skills:
+        lower_map[s.lower()] = s
+
+    merged_set = set()  # 已被合并掉的技能（不再单独出现）
+    result = []
+    used_groups = set()
+
+    for group in _SKILL_MERGE_GROUPS:
+        # 找当前技能列表中属于该组的项
+        matched = [s for s in skills if s in group or s.lower() in {g.lower() for g in group}]
+        if len(matched) >= 2:
+            # 多个同族技能 → 合并
+            # 按组内顺序排列
+            group_lower = [g.lower() for g in group]
+            matched_sorted = sorted(matched, key=lambda x: group_lower.index(x.lower()) if x.lower() in group_lower else 99)
+            merged_label = "/".join(matched_sorted)
+            result.append(merged_label)
+            for m in matched:
+                merged_set.add(m)
+            used_groups.add(id(group))
+        elif len(matched) == 1:
+            # 只有一个，不合并，保留原样（稍后统一添加）
+            pass
+
+    # 添加未被合并的技能
+    for s in skills:
+        if s not in merged_set and s not in result:
+            result.append(s)
+
     return result
 
 

@@ -14,6 +14,33 @@
         <p class="score-summary">{{ report.summary }}</p>
       </div>
 
+      <!-- 五维雷达图 -->
+      <div class="card" v-if="radarData.length">
+        <div class="card-title">能力维度分析</div>
+        <div class="radar-wrap">
+          <svg viewBox="0 0 300 280" class="radar-svg">
+            <!-- 背景网格（3层五边形） -->
+            <polygon v-for="level in [1, 0.66, 0.33]" :key="'g'+level"
+              :points="gridPoints(level)" fill="none" stroke="#2a2a3e" stroke-width="1"/>
+            <!-- 轴线 -->
+            <line v-for="(d, i) in radarData" :key="'ax'+i"
+              x1="150" y1="140" :x2="axisEnd(i).x" :y2="axisEnd(i).y" stroke="#2a2a3e" stroke-width="1"/>
+            <!-- 数据多边形 -->
+            <polygon :points="dataPoints" fill="rgba(108,92,231,0.25)" stroke="#6c5ce7" stroke-width="2"/>
+            <!-- 数据点 -->
+            <circle v-for="(d, i) in radarData" :key="'pt'+i"
+              :cx="dataPoint(i).x" :cy="dataPoint(i).y" r="4" fill="#6c5ce7"/>
+            <!-- 标签 -->
+            <text v-for="(d, i) in radarData" :key="'lb'+i"
+              :x="labelPos(i).x" :y="labelPos(i).y"
+              text-anchor="middle" font-size="12" fill="#e4e4ec">{{ d.label }}</text>
+            <text v-for="(d, i) in radarData" :key="'sc'+i"
+              :x="labelPos(i).x" :y="labelPos(i).y + 14"
+              text-anchor="middle" font-size="10" fill="#9898b0">{{ d.score }}分</text>
+          </svg>
+        </div>
+      </div>
+
       <!-- 优势 -->
       <div class="card" v-if="report.strengths && report.strengths.length">
         <div class="card-title">✅ 优势亮点</div>
@@ -57,7 +84,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { getInterviewReport } from '../api'
 
@@ -66,10 +93,59 @@ const loading = ref(true)
 const report = ref(null)
 const rounds = ref([])
 
+const GRADE_SCORE = { S: 100, A: 85, B: 70, C: 55, D: 40, E: 25, F: 10 }
+const DIM_LABELS = ['项目经验', '技术深度', '应变能力', '表达逻辑', '软性素质']
+
+const radarData = computed(() => {
+  if (!rounds.value.length) return []
+  return rounds.value.slice(0, 5).map((r, i) => ({
+    label: DIM_LABELS[i] || `第${i + 1}题`,
+    score: GRADE_SCORE[r.grade] ?? 55,
+  }))
+})
+
+// SVG 雷达图几何计算（中心150,140 半径100）
+const CX = 150, CY = 140, R = 100
+
+function angleFor(i) {
+  return (Math.PI * 2 * i) / 5 - Math.PI / 2
+}
+
+function gridPoints(level) {
+  return Array.from({ length: 5 }, (_, i) => {
+    const a = angleFor(i)
+    return `${CX + R * level * Math.cos(a)},${CY + R * level * Math.sin(a)}`
+  }).join(' ')
+}
+
+function axisEnd(i) {
+  const a = angleFor(i)
+  return { x: CX + R * Math.cos(a), y: CY + R * Math.sin(a) }
+}
+
+function dataPoint(i) {
+  const a = angleFor(i)
+  const ratio = (radarData.value[i]?.score ?? 50) / 100
+  return { x: CX + R * ratio * Math.cos(a), y: CY + R * ratio * Math.sin(a) }
+}
+
+const dataPoints = computed(() =>
+  radarData.value.map((_, i) => {
+    const p = dataPoint(i)
+    return `${p.x},${p.y}`
+  }).join(' ')
+)
+
+function labelPos(i) {
+  const a = angleFor(i)
+  return { x: CX + (R + 24) * Math.cos(a), y: CY + (R + 24) * Math.sin(a) }
+}
+
 onMounted(async () => {
   const history = JSON.parse(sessionStorage.getItem('interviewHistory') || '[]')
   const jdText = sessionStorage.getItem('interviewJd') || ''
   const resumeData = JSON.parse(sessionStorage.getItem('resumeData') || 'null')
+  const preRounds = JSON.parse(sessionStorage.getItem('interviewRounds') || '[]')
 
   if (!history.length) {
     loading.value = false
@@ -84,6 +160,7 @@ onMounted(async () => {
       round_num: 5,
       history: history,
       user_answer: '',
+      rounds: preRounds,
     })
     report.value = res.data.report
     rounds.value = (res.data.rounds || []).map(r => ({ ...r, expanded: false }))
@@ -119,6 +196,9 @@ function retry() {
 .score-num { font-size: 56px; font-weight: 700; color: #6c5ce7; }
 .score-max { font-size: 20px; color: #9898b0; }
 .score-summary { font-size: 14px; color: #9898b0; max-width: 500px; margin: 0 auto; }
+
+.radar-wrap { display: flex; justify-content: center; padding: 8px 0; }
+.radar-svg { width: 300px; max-width: 100%; }
 
 .list { padding-left: 20px; }
 .list li { font-size: 14px; color: #e4e4ec; margin-bottom: 8px; line-height: 1.5; }

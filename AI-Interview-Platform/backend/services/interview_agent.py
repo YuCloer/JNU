@@ -2,11 +2,9 @@
 import json
 from typing import TypedDict, Annotated
 
-from langchain_ollama import ChatOllama
 from langgraph.graph import StateGraph, END
 
-llm = ChatOllama(model="qwen2.5:3b", temperature=0.7)
-llm_json = ChatOllama(model="qwen2.5:3b", format="json", temperature=0.3)
+from services.llm_client import llm, llm_json
 
 MAX_ROUNDS = 5
 
@@ -260,3 +258,23 @@ def generate_final_report(rounds: list[dict], jd_text: str) -> dict:
     }
     result = generate_report(state)
     return result["report"]
+
+
+async def astream_next_question(resume_data: dict, jd_text: str, history: list[dict], round_num: int):
+    """异步流式生成面试问题，逐token yield"""
+    resume_summary = build_resume_summary(resume_data)
+    history_text = "\n".join(
+        f"{'面试官' if m['role'] == 'assistant' else '候选人'}: {m['content']}"
+        for m in history
+    ) or "（首轮，无历史）"
+
+    prompt = QUESTION_GEN_PROMPT.format(
+        resume_summary=resume_summary,
+        jd_text=jd_text or "通用技术岗",
+        history=history_text,
+        round_num=round_num,
+        max_rounds=MAX_ROUNDS,
+    )
+    async for chunk in llm.astream(prompt):
+        if chunk.content:
+            yield chunk.content
