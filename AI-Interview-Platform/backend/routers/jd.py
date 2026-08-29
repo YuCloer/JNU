@@ -1,4 +1,6 @@
 """JD匹配路由"""
+import asyncio
+
 from fastapi import APIRouter, HTTPException
 
 from schemas import JDAnalyzeRequest
@@ -67,13 +69,15 @@ async def analyze_jd(request: JDAnalyzeRequest):
         jd_text = JD_TEMPLATES[jd_text]
 
     # 提取JD技能
-    jd_skills = extract_jd_skills(jd_text)
+    jd_skills = await asyncio.to_thread(extract_jd_skills, jd_text)
 
     # 从简历全部字段提取能力标签（不只是skills数组）
     resume_skills = _build_resume_capabilities(request.resume_data)
 
     # 岗位匹配度（学历20% + 技能50% + 经验30%）
-    match_result = match_position(request.resume_data, resume_skills, jd_skills, jd_text)
+    match_result = await asyncio.to_thread(
+        match_position, request.resume_data, resume_skills, jd_skills, jd_text
+    )
 
     return {
         "status": "ok",

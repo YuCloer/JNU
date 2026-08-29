@@ -11,15 +11,18 @@ router = APIRouter()
 @router.post("/parse")
 async def parse_resume(file: UploadFile = File(...)):
     """上传简历文件并解析为结构化数据"""
-    if not file.filename.endswith((".pdf", ".docx")):
+    filename = file.filename or ""
+    if not filename.lower().endswith((".pdf", ".docx")):
         raise HTTPException(status_code=400, detail="仅支持 PDF 和 Word(.docx) 格式")
 
     content = await file.read()
     if not content:
         raise HTTPException(status_code=400, detail="文件内容为空")
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="文件过大，最大支持10MB")
 
     try:
-        raw_text = extract_text_from_file(content, file.filename)
+        raw_text = extract_text_from_file(content, filename.lower())
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception:

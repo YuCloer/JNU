@@ -102,7 +102,7 @@ npm run dev
 docker compose up -d
 ```
 
-访问 http://localhost:3000。默认配置可在 CPU 环境运行；如需 GPU 加速，请按本机 Docker 与 Ollama 的 GPU 配置启用运行时支持。
+首次启动会自动下载 `qwen2.5:3b` 和 `bge-m3`，完成后访问 http://localhost:3000。默认配置可在 CPU 环境运行；如需 GPU 加速，请按本机 Docker 与 Ollama 的 GPU 配置启用运行时支持。
 
 ## 可靠性与数据边界
 

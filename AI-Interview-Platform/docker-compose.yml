@@ -6,6 +6,15 @@ services:
     volumes:
       - ollama_data:/root/.ollama
 
+  ollama-init:
+    image: ollama/ollama:latest
+    environment:
+      - OLLAMA_HOST=http://ollama:11434
+    depends_on:
+      - ollama
+    command: ["sh", "-c", "until ollama list; do sleep 2; done; ollama pull qwen2.5:3b && ollama pull bge-m3"]
+    restart: "no"
+
   chroma:
     image: chromadb/chroma:latest
     ports:
@@ -23,8 +32,10 @@ services:
       - OLLAMA_HOST=http://ollama:11434
       - CHROMA_HOST=http://chroma:8000
     depends_on:
-      - ollama
-      - chroma
+      ollama-init:
+        condition: service_completed_successfully
+      chroma:
+        condition: service_started
 
   frontend:
     build: ./frontend
