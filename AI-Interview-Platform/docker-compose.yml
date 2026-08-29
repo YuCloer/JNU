@@ -5,13 +5,15 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+
+  chroma:
+    image: chromadb/chroma:latest
+    ports:
+      - "8001:8000"
+    volumes:
+      - chroma_data:/chroma/chroma
+    environment:
+      - IS_PERSISTENT=TRUE
 
   backend:
     build: ./backend
@@ -19,8 +21,10 @@ services:
       - "8000:8000"
     environment:
       - OLLAMA_HOST=http://ollama:11434
+      - CHROMA_HOST=http://chroma:8000
     depends_on:
       - ollama
+      - chroma
 
   frontend:
     build: ./frontend
@@ -31,3 +35,4 @@ services:
 
 volumes:
   ollama_data:
+  chroma_data:

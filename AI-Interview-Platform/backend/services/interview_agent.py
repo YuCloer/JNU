@@ -4,7 +4,7 @@ from typing import TypedDict, Annotated
 
 from langgraph.graph import StateGraph, END
 
-from services.llm_client import llm, llm_json
+from services.llm_client import llm, llm_json, get_llm_with_temperature
 
 MAX_ROUNDS = 5
 
@@ -108,6 +108,15 @@ def build_resume_summary(resume_data: dict) -> str:
     return "\n".join(parts) if parts else "简历信息较少"
 
 
+def _get_temp_for_round(round_num: int) -> float:
+    """轮次越多温度越高，增加追问变体"""
+    if round_num <= 2:
+        return 0.7
+    elif round_num == 3:
+        return 0.85
+    return 1.0
+
+
 def generate_question(state: InterviewState) -> dict:
     """问题生成节点"""
     history_text = "\n".join(
@@ -122,7 +131,9 @@ def generate_question(state: InterviewState) -> dict:
         round_num=state["round_num"],
         max_rounds=MAX_ROUNDS,
     )
-    result = llm.invoke(prompt)
+    temp = _get_temp_for_round(state["round_num"])
+    active_llm = llm if temp == 0.7 else get_llm_with_temperature(temp)
+    result = active_llm.invoke(prompt)
     return {"current_question": result.content.strip()}
 
 
@@ -182,7 +193,7 @@ def generate_report(state: InterviewState) -> dict:
         report = {
             "total_grade": grade_order[avg_idx],
             "strengths": ["完成全部面试轮次"],
-            "improvements": ["建议补充更多项目细节", "注意量化成果"],
+            "improvements": ["建议补充更多项目细节", "注意量化成果", "建议提前准备岗位相关技术问题的回答思路"],
             "summary": "面试完成，整体表现中等，建议加强项目经验的深度表达。",
         }
     return {"report": report}
@@ -275,6 +286,8 @@ async def astream_next_question(resume_data: dict, jd_text: str, history: list[d
         round_num=round_num,
         max_rounds=MAX_ROUNDS,
     )
-    async for chunk in llm.astream(prompt):
+    temp = _get_temp_for_round(round_num)
+    active_llm = llm if temp == 0.7 else get_llm_with_temperature(temp)
+    async for chunk in active_llm.astream(prompt):
         if chunk.content:
             yield chunk.content

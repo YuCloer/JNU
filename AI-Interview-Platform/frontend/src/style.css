@@ -60,6 +60,7 @@ body {
   border-radius: 14px;
   padding: 24px;
   margin-bottom: 20px;
+  transition: all 0.2s ease;
 }
 
 .card-title {
@@ -167,4 +168,14 @@ textarea {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* 移动端适配 */
+@media (max-width: 480px) {
+  .nav-brand { font-size: 15px; }
+  .nav-links { gap: 12px; }
+  .nav-links a { font-size: 13px; }
+  .main-content { padding: 20px 12px; }
+  .chat-area { height: calc(100vh - 320px) !important; }
+  .info-grid { grid-template-columns: 1fr !important; }
 }

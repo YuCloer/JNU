@@ -1,5 +1,4 @@
 from pydantic import BaseModel, Field
-from typing import Optional
 
 
 # ========== 简历相关 ==========
@@ -29,21 +28,21 @@ class ResumeSchema(BaseModel):
     name: str = ""
     email: str = ""
     phone: str = ""
-    education: list[EducationItem] = []
-    skills: list[str] = []
-    languages: list[str] = []
-    experiences: list[ExperienceItem] = []
-    projects: list[ProjectItem] = []
+    education: list[EducationItem] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
+    languages: list[str] = Field(default_factory=list)
+    experiences: list[ExperienceItem] = Field(default_factory=list)
+    projects: list[ProjectItem] = Field(default_factory=list)
 
 
 # ========== 面试相关 ==========
 class InterviewRequest(BaseModel):
     resume_data: dict
-    jd_text: str = ""
-    round_num: int = 1
-    history: list[dict] = []  # [{"role": "user"/"assistant", "content": "..."}]
-    user_answer: str = ""
-    rounds: list[dict] = []  # 已评估的轮次（chat时产生），report接口直接复用避免重复LLM调用
+    jd_text: str = Field(default="", max_length=10000)
+    round_num: int = Field(default=1, ge=1, le=5)
+    history: list[dict] = Field(default_factory=list)  # [{"role": "user"/"assistant", "content": "..."}]
+    user_answer: str = Field(default="", max_length=5000)
+    rounds: list[dict] = Field(default_factory=list)  # 已评估的轮次（chat时产生），report接口直接复用避免重复LLM调用
 
 
 class InterviewRound(BaseModel):
@@ -56,19 +55,19 @@ class InterviewRound(BaseModel):
 
 class InterviewReport(BaseModel):
     total_grade: str = "C"  # S/A/B/C/D/E/F，C及以上合格
-    rounds: list[InterviewRound] = []
-    strengths: list[str] = []
-    improvements: list[str] = []
+    rounds: list[InterviewRound] = Field(default_factory=list)
+    strengths: list[str] = Field(default_factory=list)
+    improvements: list[str] = Field(default_factory=list)
     summary: str = ""
 
 
 # ========== JD 匹配 ==========
 class JDAnalyzeRequest(BaseModel):
-    jd_text: str
+    jd_text: str = Field(min_length=1, max_length=10000)
     resume_data: dict
 
 
 class SkillMatch(BaseModel):
-    matched: list[str] = []
-    missing: list[str] = []
+    matched: list[str] = Field(default_factory=list)
+    missing: list[str] = Field(default_factory=list)
     match_rate: float = 0.0

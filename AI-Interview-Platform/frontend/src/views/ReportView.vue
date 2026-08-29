@@ -4,6 +4,12 @@
 
     <div class="loading" v-if="loading">正在生成报告</div>
 
+    <!-- 空态：无面试记录 -->
+    <div class="card" v-if="!loading && !report && rounds.length === 0" style="text-align: center; padding: 48px;">
+      <p style="color: #9898b0; font-size: 15px; margin-bottom: 16px;">暂无面试记录</p>
+      <button class="btn btn-primary" @click="$router.push('/interview')">去面试 →</button>
+    </div>
+
     <template v-if="report && !loading">
       <!-- 综合评分 -->
       <div class="card score-card">
@@ -149,7 +155,6 @@ onMounted(async () => {
 
   if (!history.length) {
     loading.value = false
-    router.push('/interview')
     return
   }
 

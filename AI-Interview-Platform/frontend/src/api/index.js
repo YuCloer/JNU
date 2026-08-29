@@ -5,6 +5,34 @@ const api = axios.create({
   timeout: 60000,
 })
 
+async function fetchSSE(url, payload) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+
+  if (response.ok) return response
+
+  let detail = `请求失败（${response.status}）`
+  try {
+    detail = (await response.json()).detail || detail
+  } catch (_) { /* 使用默认错误信息 */ }
+  throw new Error(detail)
+}
+
+// 全局响应拦截：Ollama 不可达友好提示
+api.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    const detail = err.response?.data?.detail || ''
+    if (err.response?.status === 500 && /ollama|模型/i.test(detail)) {
+      alert('模型服务不可达，请确认 Ollama 已启动')
+    }
+    return Promise.reject(err)
+  }
+)
+
 // 简历解析
 export function uploadResume(file) {
   const formData = new FormData()
@@ -27,20 +55,12 @@ export function getJDTemplates() {
 
 // 开始面试（SSE流式）
 export function startInterviewSSE(resumeData, jdText) {
-  return fetch('/interview/start', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ resume_data: resumeData, jd_text: jdText, round_num: 1, history: [] }),
-  })
+  return fetchSSE('/interview/start', { resume_data: resumeData, jd_text: jdText, round_num: 1, history: [] })
 }
 
 // 面试对话（SSE流式）
 export function interviewChatSSE(payload) {
-  return fetch('/interview/chat', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  })
+  return fetchSSE('/interview/chat', payload)
 }
 
 // 获取面试报告

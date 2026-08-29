@@ -1,6 +1,6 @@
 # 智能简历分析与AI模拟面试平台
 
-基于 Python 的 AI 应用开发实训项目。面向应届生的本地 AI 求职助手——上传简历即可获得智能解析、岗位匹配分析与多轮模拟面试，全程零云端依赖。
+面向应届生的本地 AI 求职助手：上传简历即可获得结构化解析、JD 匹配分析和五轮模拟面试。项目采用 Vue 3、FastAPI 与 Ollama 构建，简历与模型推理均可保留在本机完成，不依赖第三方云端 API。
 
 ## 技术栈
 
@@ -94,15 +94,22 @@ npm install
 npm run dev
 ```
 
-访问 http://localhost:3000
+访问 http://localhost:5173
 
 ### Docker 部署
 
 ```bash
-docker compose up --build
+docker compose up -d
 ```
 
-访问 http://localhost:3000
+访问 http://localhost:3000。默认配置可在 CPU 环境运行；如需 GPU 加速，请按本机 Docker 与 Ollama 的 GPU 配置启用运行时支持。
+
+## 可靠性与数据边界
+
+- 上传文件仅支持 `.pdf` 与 `.docx`，单个文件最大 10MB。
+- 后端对异常请求头、超长 JD/回答和无效面试轮次进行校验。
+- 面试评分始终使用最近一道面试题与本次回答配对，避免对话记录重复导致评分偏差。
+- 前端会在上传前提示超限文件，并在流式接口返回 HTTP 错误时显示可读错误信息。
 
 ## 验收标准
 

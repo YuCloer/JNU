@@ -10,7 +10,12 @@
 
     <!-- 聊天区域 -->
     <div class="chat-area" ref="chatArea">
-      <div v-for="(msg, i) in messages" :key="i" class="msg" :class="msg.role">
+      <div v-if="messages.length === 0 && waitingFirst" class="empty-hint">
+        <div class="skeleton-line"></div>
+        <div class="skeleton-line short"></div>
+        <p>正在准备面试问题...</p>
+      </div>
+      <div v-for="(msg, i) in messages" :key="i" class="msg slide-up" :class="msg.role">
         <div class="msg-bubble">{{ msg.content }}</div>
         <div class="msg-eval" v-if="msg.eval">
           <span class="eval-score">等级：{{ msg.eval.grade }}</span>
@@ -25,6 +30,11 @@
       <div v-if="streaming" class="msg assistant">
         <div class="msg-bubble typing">{{ streamingText }}<span class="cursor">|</span></div>
       </div>
+    </div>
+
+    <!-- 重连提示 -->
+    <div class="reconnect-bar" v-if="reconnecting">
+      ⚠️ 连接中断，{{ reconnectCountdown }} 秒后自动重连（第 {{ retryCount }}/3 次）
     </div>
 
     <!-- 输入区域 -->
@@ -66,6 +76,9 @@ const finished = ref(false)
 const waitingFirst = ref(true)
 const chatArea = ref(null)
 const history = ref([])
+const reconnecting = ref(false)
+const reconnectCountdown = ref(0)
+const retryCount = ref(0)
 
 const lastUserIndex = computed(() => {
   for (let i = messages.value.length - 1; i >= 0; i--) {
@@ -87,7 +100,10 @@ onMounted(async () => {
     return
   }
 
-  // 开始面试，获取第一个问题
+  await fetchFirstQuestion()
+})
+
+async function fetchFirstQuestion() {
   streaming.value = true
   try {
     const response = await startInterviewSSE(resumeData, jdText)
@@ -101,7 +117,7 @@ onMounted(async () => {
       if (done) break
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n')
-      buffer = lines.pop()  // 最后一行可能不完整，留到下次
+      buffer = lines.pop()
       for (const line of lines) {
         if (line.startsWith('data: ')) {
           try {
@@ -123,15 +139,39 @@ onMounted(async () => {
 
     messages.value.push({ role: 'assistant', content: question })
     history.value.push({ role: 'assistant', content: question })
+    retryCount.value = 0
   } catch (e) {
-    messages.value.push({ role: 'assistant', content: '面试启动失败，请检查后端服务是否运行。' })
+    await retryWithBackoff(fetchFirstQuestion)
   } finally {
     streaming.value = false
     streamingText.value = ''
     waitingFirst.value = false
     scrollToBottom()
   }
-})
+}
+
+function retryWithBackoff(fn) {
+  return new Promise((resolve) => {
+    if (retryCount.value >= 3) {
+      messages.value.push({ role: 'assistant', content: '连接失败，请刷新页面重试。' })
+      reconnecting.value = false
+      resolve()
+      return
+    }
+    retryCount.value++
+    const delay = Math.pow(2, retryCount.value)  // 2s / 4s / 8s
+    reconnecting.value = true
+    reconnectCountdown.value = delay
+    const timer = setInterval(() => {
+      reconnectCountdown.value--
+      if (reconnectCountdown.value <= 0) {
+        clearInterval(timer)
+        reconnecting.value = false
+        fn().then(resolve)
+      }
+    }, 1000)
+  })
+}
 
 async function sendAnswer() {
   if (!userInput.value.trim() || streaming.value) return
@@ -202,12 +242,60 @@ async function sendAnswer() {
       currentRound.value++
     }
   } catch (e) {
-    messages.value.push({ role: 'assistant', content: '连接中断，请重试。' })
+    // 断连后指数退避重连，从 history 最后一轮恢复
+    await retryWithBackoff(async () => {
+      await sendAnswerRetry(answer)
+    })
   } finally {
     streaming.value = false
     streamingText.value = ''
     scrollToBottom()
   }
+}
+
+async function sendAnswerRetry(answer) {
+  streaming.value = true
+  streamingText.value = ''
+  const response = await interviewChatSSE({
+    resume_data: resumeData,
+    jd_text: jdText,
+    round_num: currentRound.value,
+    history: history.value,
+    user_answer: answer,
+  })
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let question = ''
+  let buffer = ''
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop()
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try {
+          const data = JSON.parse(line.slice(6))
+          if (data.type === 'token') {
+            question += data.token
+            streamingText.value = question
+          } else if (data.type === 'end') {
+            finished.value = true
+          }
+        } catch (_) {}
+      }
+    }
+  }
+  if (question) {
+    messages.value.push({ role: 'assistant', content: question })
+    history.value.push({ role: 'assistant', content: question })
+    currentRound.value++
+    retryCount.value = 0
+  }
+  streaming.value = false
+  streamingText.value = ''
+  scrollToBottom()
 }
 
 function scrollToBottom() {
@@ -224,7 +312,7 @@ function reEdit(index) {
   // history 同步截断（history与messages一一对应）
   history.value = history.value.slice(0, index)
   // 移除对应的评估记录
-  if (evaluatedRounds.length) evaluatedRounds.pop()
+  evaluatedRounds.splice(Math.floor(index / 2))
   // 回退轮次
   if (currentRound.value > 1) currentRound.value--
   finished.value = false
@@ -329,4 +417,33 @@ function viewReport() {
   transition: color 0.2s, border-color 0.2s;
 }
 .re-edit-btn:hover { color: #6c5ce7; border-color: #6c5ce7; }
+
+.empty-hint { text-align: center; padding: 40px 0; color: #9898b0; font-size: 14px; }
+.skeleton-line {
+  height: 14px;
+  background: #2a2a38;
+  border-radius: 4px;
+  margin: 0 auto 10px;
+  width: 70%;
+  animation: pulse 1.5s infinite;
+}
+.skeleton-line.short { width: 45%; }
+@keyframes pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+
+.reconnect-bar {
+  background: rgba(240, 160, 64, 0.1);
+  border: 1px solid rgba(240, 160, 64, 0.3);
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 13px;
+  color: #f0a040;
+  margin-bottom: 12px;
+  text-align: center;
+}
+
+.slide-up { animation: slideUp 0.3s ease; }
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 </style>

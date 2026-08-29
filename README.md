@@ -18,7 +18,7 @@
 
 | Project | What it solves | Highlights |
 | --- | --- | --- |
-| [AI Interview Platform](./AI-Interview-Platform) | 面向应届生的本地 AI 求职助手：解析简历、匹配职位、进行多轮模拟面试。 | Vue 3 · FastAPI · LangGraph · Ollama · Docker |
+| [AI Interview Platform](./AI-Interview-Platform) | 本地优先的 AI 求职助手：结构化解析简历、分析 JD 匹配度，并完成五轮流式模拟面试。 | Vue 3 · FastAPI · LangGraph · Ollama · Docker |
 | [JNU Grade Checker Guard](./Grade-Watcher) | 自动监控教务成绩、微信推送，并计算学期 / 学年 / 总 GPA。 | Playwright · AES-256-GCM · Windows DPAPI · CLI |
 | [RL: Bellman & Advantage Learning](./RL/Bellman) | 在 ChainWalk 环境中实现并比较 Bellman 最优性更新与优势学习。 | Dynamic Programming · Reinforcement Learning · Matplotlib |
 
