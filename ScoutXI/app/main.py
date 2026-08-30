@@ -226,7 +226,7 @@ def reconcile_current_rosters(connection: sqlite3.Connection) -> dict:
         source = next((player for player in matches if player["club_id"] == event["from_club_id"]), None)
         if source and target_exists:
             connection.execute("""UPDATE players SET club_id=?, is_current=1, data_source=?, source_updated_at=?,
-                bio=? WHERE id=?""", (event["to_club_id"], f"官方转会校正：{event['source_name']}", event["verified_at"],
+                bio=?, avatar_url=NULL, avatar_club_id=NULL, avatar_verified_at=NULL WHERE id=?""", (event["to_club_id"], f"官方转会校正：{event['source_name']}", event["verified_at"],
                 f"{event['transfer_type']}；以官方公告为准：{event['source_url']}", source["id"]))
             applied += 1
         elif source and not target_exists:
@@ -240,7 +240,8 @@ def reconcile_current_rosters(connection: sqlite3.Connection) -> dict:
             # provider.  Move an unambiguous current record into the target.
             source = matches[0] if len(matches) == 1 else None
             if source:
-                connection.execute("UPDATE players SET club_id=?, is_current=1, data_source=?, source_updated_at=? WHERE id=?",
+                connection.execute("""UPDATE players SET club_id=?, is_current=1, data_source=?, source_updated_at=?,
+                    avatar_url=NULL, avatar_club_id=NULL, avatar_verified_at=NULL WHERE id=?""",
                     (event["to_club_id"], f"转会校正：{event['source_name']}", event["verified_at"], source["id"]))
                 applied += 1
             else:
@@ -293,7 +294,8 @@ def init_db() -> None:
             id TEXT PRIMARY KEY, name TEXT NOT NULL, name_zh TEXT NOT NULL, position TEXT NOT NULL, age INTEGER NOT NULL,
             nationality TEXT NOT NULL, foot TEXT NOT NULL, club_id TEXT NOT NULL REFERENCES clubs(id), shirt_no INTEGER,
             height_cm INTEGER, bio TEXT, appearances INTEGER DEFAULT 0, goals INTEGER DEFAULT 0, assists INTEGER DEFAULT 0, rating INTEGER DEFAULT 0,
-            data_source TEXT NOT NULL DEFAULT 'seed', source_updated_at TEXT, is_current INTEGER NOT NULL DEFAULT 1);
+            data_source TEXT NOT NULL DEFAULT 'seed', source_updated_at TEXT, is_current INTEGER NOT NULL DEFAULT 1,
+            avatar_url TEXT, avatar_club_id TEXT REFERENCES clubs(id), avatar_verified_at TEXT);
         CREATE TABLE IF NOT EXISTS seasons (id TEXT PRIMARY KEY, name TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS favorites (player_id TEXT PRIMARY KEY REFERENCES players(id), created_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS lineups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, formation TEXT NOT NULL, season TEXT NOT NULL, captain_id TEXT, notes TEXT DEFAULT '', updated_at TEXT NOT NULL);
@@ -322,6 +324,8 @@ def init_db() -> None:
             "ALTER TABLE players ADD COLUMN source_updated_at TEXT",
             "ALTER TABLE players ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE players ADD COLUMN avatar_url TEXT",
+            "ALTER TABLE players ADD COLUMN avatar_club_id TEXT",
+            "ALTER TABLE players ADD COLUMN avatar_verified_at TEXT",
         ]:
             column = statement.split()[5]
             if column not in player_columns:
@@ -394,7 +398,7 @@ def list_featured_players(limit: int = Query(default=12, ge=1, le=30)) -> list[d
         return rows(connection.execute("""SELECT p.*,c.name AS club_name,c.logo_url,f.league_code,f.goals AS recent_goals,
             f.assists AS recent_assists,f.rank_score,f.source_updated_at AS featured_updated_at
             FROM featured_players f JOIN players p ON p.id=f.player_id JOIN clubs c ON c.id=p.club_id
-            WHERE p.is_current=1 AND p.avatar_url IS NOT NULL AND p.avatar_url<>''
+            WHERE p.is_current=1
             ORDER BY f.rank_score DESC,f.goals DESC,f.assists DESC,p.name LIMIT ?""", (limit,)))
 
 
@@ -580,8 +584,8 @@ def fetch_sportsdb_profiles(team_name: str) -> dict[str, dict]:
     return profiles
 
 
-def fetch_sportsdb_player_avatar(name: str) -> str | None:
-    """Look up one public player profile and retain only its remote thumbnail URL."""
+def fetch_sportsdb_player_avatar(name: str, expected_club_name: str | None = None) -> str | None:
+    """Return a remote portrait only when its profile agrees with the current club."""
     try:
         query = urllib.parse.quote(name)
         with urllib.request.urlopen(f"https://www.thesportsdb.com/api/v1/json/123/searchplayers.php?p={query}", timeout=15) as response:
@@ -590,6 +594,8 @@ def fetch_sportsdb_player_avatar(name: str) -> str | None:
         return None
     normalized = normalize_person_name(name)
     exact = next((person for person in people if normalize_person_name(person.get("strPlayer") or "") == normalized), None)
+    if expected_club_name and (not exact or normalize_club_name(exact.get("strTeam") or "") != normalize_club_name(expected_club_name)):
+        return None
     return exact.get("strThumb") if exact else None
 
 
@@ -622,26 +628,58 @@ def fetch_wikimedia_player_avatar(name: str) -> str | None:
 def enrich_manchester_city_avatars() -> dict:
     """Fill and correct remote avatar URLs without storing image files."""
     with closing(db()) as connection:
-        players_to_enrich = rows(connection.execute("""SELECT id,name FROM players
-            WHERE club_id='man-city' AND is_current=1
+        players_to_enrich = rows(connection.execute("""SELECT p.id,p.name,p.club_id,c.name AS club_name FROM players p
+            JOIN clubs c ON c.id=p.club_id WHERE p.club_id='man-city' AND p.is_current=1
               AND (avatar_url IS NULL OR avatar_url='' OR name IN ('Rodri','Sávio')) ORDER BY name"""))
     updated, unavailable = [], []
     for player in players_to_enrich:
         if player["name"] in OFFICIAL_AVATAR_URLS:
             avatar_url = OFFICIAL_AVATAR_URLS[player["name"]]
         elif player["name"] in CURATED_AVATAR_NAMES:
-            avatar_url = fetch_wikimedia_player_avatar(player["name"])
+            avatar_url = None
         else:
-            avatar_url = fetch_sportsdb_player_avatar(player["name"]) or fetch_wikimedia_player_avatar(player["name"])
+            avatar_url = fetch_sportsdb_player_avatar(player["name"], player["club_name"])
         if avatar_url:
             with closing(db()) as connection:
-                connection.execute("UPDATE players SET avatar_url=? WHERE id=?", (avatar_url, player["id"]))
+                connection.execute("UPDATE players SET avatar_url=?,avatar_club_id=?,avatar_verified_at=? WHERE id=?",
+                    (avatar_url, player["club_id"], datetime.now(timezone.utc).isoformat(), player["id"]))
                 connection.commit()
             updated.append(player["name"])
         else:
             unavailable.append(player["name"])
         time.sleep(0.15)
     return {"club": "Manchester City", "updated": len(updated), "unavailable": unavailable, "storage": "remote URLs only"}
+
+
+@app.post("/api/admin/audit-avatars")
+def audit_current_avatars(max_players: int = Query(default=120, ge=1, le=150)) -> dict:
+    """Remove any portrait that cannot be tied to the player's current club.
+
+    A public image service may retain an old kit even when the person record is
+    valid.  We therefore accept only profiles whose current team field matches
+    ScoutXI's current roster club; uncertain images become neutral placeholders.
+    """
+    verified_at = datetime.now(timezone.utc).isoformat()
+    with closing(db()) as connection:
+        candidates = rows(connection.execute("""SELECT p.id,p.name,p.club_id,c.name AS club_name FROM players p
+            JOIN clubs c ON c.id=p.club_id WHERE p.is_current=1 AND p.avatar_url IS NOT NULL AND p.avatar_url<>''
+            ORDER BY p.avatar_verified_at IS NULL DESC,p.name LIMIT ?""", (max_players,)))
+    verified, cleared = 0, []
+    for player in candidates:
+        avatar_url = fetch_sportsdb_player_avatar(player["name"], player["club_name"])
+        with closing(db()) as connection:
+            if avatar_url:
+                connection.execute("UPDATE players SET avatar_url=?,avatar_club_id=?,avatar_verified_at=? WHERE id=?",
+                    (avatar_url, player["club_id"], verified_at, player["id"]))
+                verified += 1
+            else:
+                connection.execute("UPDATE players SET avatar_url=NULL,avatar_club_id=NULL,avatar_verified_at=? WHERE id=?",
+                    (verified_at, player["id"]))
+                cleared.append(player["name"])
+            connection.commit()
+        time.sleep(0.12)
+    return {"checked": len(candidates), "verified": verified, "cleared": len(cleared),
+            "cleared_players": cleared[:30], "policy": "current-club profile match only"}
 
 
 @app.post("/api/admin/curate-manchester-city")
@@ -692,14 +730,16 @@ def fetch_competition_scorers(league_code: str, token: str) -> dict:
 def enrich_featured_player_avatars(limit: int = 18) -> dict:
     """Store only trustworthy remote portrait URLs for the visible focus cards."""
     with closing(db()) as connection:
-        featured = rows(connection.execute("""SELECT p.id,p.name FROM featured_players f JOIN players p ON p.id=f.player_id
+        featured = rows(connection.execute("""SELECT p.id,p.name,p.club_id,c.name AS club_name FROM featured_players f JOIN players p ON p.id=f.player_id
+            JOIN clubs c ON c.id=p.club_id
             WHERE p.is_current=1 AND (p.avatar_url IS NULL OR p.avatar_url='') ORDER BY f.rank_score DESC LIMIT ?""", (limit,)))
     updated, unavailable = 0, []
     for player in featured:
-        avatar_url = fetch_sportsdb_player_avatar(player["name"]) or fetch_wikimedia_player_avatar(player["name"])
+        avatar_url = fetch_sportsdb_player_avatar(player["name"], player["club_name"])
         if avatar_url:
             with closing(db()) as connection:
-                connection.execute("UPDATE players SET avatar_url=? WHERE id=?", (avatar_url, player["id"]))
+                connection.execute("UPDATE players SET avatar_url=?,avatar_club_id=?,avatar_verified_at=? WHERE id=?",
+                    (avatar_url, player["club_id"], datetime.now(timezone.utc).isoformat(), player["id"]))
                 connection.commit()
             updated += 1
         else:
@@ -1182,7 +1222,7 @@ def refresh_api_football_squads(token: str, max_teams: int) -> dict:
                     player_id = f"af-{external_id}"
                     connection.execute("""INSERT INTO players(id,name,name_zh,position,age,nationality,foot,club_id,shirt_no,height_cm,bio,appearances,goals,assists,rating,data_source,source_updated_at,avatar_url,is_current)
                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
-                    ON CONFLICT(id) DO UPDATE SET name=excluded.name,name_zh=excluded.name_zh,position=excluded.position,age=excluded.age,club_id=excluded.club_id,shirt_no=excluded.shirt_no,bio=excluded.bio,data_source=excluded.data_source,source_updated_at=excluded.source_updated_at,avatar_url=excluded.avatar_url,is_current=1""", (player_id, name, name, api_football_position(name, person.get("position")), int(person.get("age") or 0), "未知", "未知", team["club_id"], person.get("number"), None, "由 API-Football 当前阵容同步；头像为远程链接，不在本机存储图片。", 0, 0, 0, 0, "API-Football", refreshed_at, person.get("photo")))
+                    ON CONFLICT(id) DO UPDATE SET name=excluded.name,name_zh=excluded.name_zh,position=excluded.position,age=excluded.age,club_id=excluded.club_id,shirt_no=excluded.shirt_no,bio=excluded.bio,data_source=excluded.data_source,source_updated_at=excluded.source_updated_at,is_current=1""", (player_id, name, name, api_football_position(name, person.get("position")), int(person.get("age") or 0), "未知", "未知", team["club_id"], person.get("number"), None, "由 API-Football 当前阵容同步；头像会经当前俱乐部资料核验后显示。", 0, 0, 0, 0, "API-Football", refreshed_at, None))
                 connection.execute("UPDATE provider_teams SET last_synced_at=? WHERE external_id=?", (refreshed_at, team["external_id"]))
                 connection.execute("INSERT OR REPLACE INTO sync_jobs(id,provider,status,finished_at,entity_count,error) VALUES(?,?,?,?,?,?)", (f"af-{team['external_id']}-{refreshed_at}", "API-Football", "SUCCESS", refreshed_at, len(squad), None))
                 connection.commit()
