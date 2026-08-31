@@ -4,6 +4,8 @@
 
 ### AI Application Developer · Full-stack Builder
 
+<sub>Local-first AI · Applied automation · Interactive products</sub>
+
 **把本地大模型、可靠后端和清晰交互，做成真正可用的产品。**
 
 <a href="#selected-work">Projects</a>&nbsp;&nbsp;·&nbsp;&nbsp;
