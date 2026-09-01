@@ -52,6 +52,27 @@ TEAM_SEARCH_NAMES = {"man-city": "Manchester City", "arsenal": "Arsenal", "real-
 FOOTBALL_DATA_LEAGUES = {"PL": "英超", "PD": "西甲", "SA": "意甲", "BL1": "德甲", "FL1": "法甲"}
 API_FOOTBALL_LEAGUES = {"PL": (39, "英超"), "PD": (140, "西甲"), "SA": (135, "意甲"), "BL1": (78, "德甲"), "FL1": (61, "法甲")}
 API_FOOTBALL_FEATURED_CLUBS = {50: "man-city", 42: "arsenal", 541: "real-madrid", 40: "liverpool", 33: "man-utd", 49: "chelsea", 529: "barcelona", 157: "bayern"}
+# football-data.org's free plan covers the five major leagues only.  These
+# prominent clubs add the requested Portuguese, Scottish and other well-known
+# leagues through TheSportsDB's public player directory; the sync endpoint
+# below records its own source and timestamp rather than pretending it is the
+# five-league provider.
+SUPPLEMENTAL_CLUBS = (
+    ("Benfica", "葡萄牙", "葡超"), ("Porto", "葡萄牙", "葡超"), ("Sporting CP", "葡萄牙", "葡超"),
+    ("Celtic", "苏格兰", "苏超"), ("Rangers", "苏格兰", "苏超"),
+    ("Ajax", "荷兰", "荷甲"), ("PSV Eindhoven", "荷兰", "荷甲"), ("Feyenoord", "荷兰", "荷甲"),
+    ("Galatasaray", "土耳其", "土超"), ("Fenerbahce", "土耳其", "土超"),
+    ("Inter Miami", "美国", "美职联"), ("Al Nassr", "沙特阿拉伯", "沙特联"),
+)
+# These two globally recognised active players are intentionally retained even
+# when their domestic competitions are outside the five-league provider plan.
+# The portrait URLs are public TheSportsDB remote assets; no image is stored.
+PRESTIGE_PLAYERS = (
+    ("prestige-lionel-messi", "Lionel Messi", "梅西", "RW", "1987-06-24", "阿根廷", "左", "tsdb-137699", 10,
+     "Inter Miami", "美国", "美职联", "https://r2.thesportsdb.com/images/media/player/thumb/kpfsvp1725295651.jpg"),
+    ("prestige-cristiano-ronaldo", "Cristiano Ronaldo", "C 罗", "ST", "1985-02-05", "葡萄牙", "右", "tsdb-136022", 7,
+     "Al-Nassr", "沙特阿拉伯", "沙特联", "https://r2.thesportsdb.com/images/media/player/thumb/bkre241600892282.jpg"),
+)
 # These names have ambiguous (or historically incorrect) matches in free image
 # providers, so they always use an exact public Wikimedia page instead.
 WIKIMEDIA_PLAYER_TITLES = {
@@ -89,45 +110,73 @@ POSITION_OVERRIDES = {
 }
 
 # Each starter occupies one fixed tactical zone. The attack direction is bottom -> top.
+# Position allowances mirror real tactical responsibilities: centre-backs do not silently
+# become full-backs or wing-backs, while wide forwards retain realistic flexibility.
 FORMATION_ZONES = {
     "4-3-3": {
-        "GK": (.50, .91, {"GK"}), "LB": (.16, .76, {"LB", "CB"}), "LCB": (.39, .77, {"CB"}),
-        "RCB": (.61, .77, {"CB"}), "RB": (.84, .76, {"RB", "CB"}), "LCM": (.25, .54, {"CM", "DM", "AM"}),
-        "CM": (.50, .59, {"CM", "DM", "AM"}), "RCM": (.75, .54, {"CM", "DM", "AM"}),
-        "LW": (.18, .27, {"LW", "RW", "AM", "ST"}), "ST": (.50, .16, {"ST", "LW", "RW"}), "RW": (.82, .27, {"RW", "LW", "AM", "ST"}),
+        "GK": (.50, .91, {"GK"}), "LB": (.16, .76, {"LB"}), "LCB": (.39, .77, {"CB"}), "RCB": (.61, .77, {"CB"}), "RB": (.84, .76, {"RB"}),
+        "LCM": (.25, .54, {"CM", "DM"}), "CM": (.50, .59, {"CM", "DM"}), "RCM": (.75, .54, {"CM", "DM"}),
+        "LW": (.18, .27, {"LW", "AM", "RW"}), "ST": (.50, .16, {"ST", "LW", "RW"}), "RW": (.82, .27, {"RW", "AM", "LW"}),
     },
     "4-2-3-1": {
-        "GK": (.50, .91, {"GK"}), "LB": (.16, .76, {"LB", "CB"}), "LCB": (.39, .77, {"CB"}),
-        "RCB": (.61, .77, {"CB"}), "RB": (.84, .76, {"RB", "CB"}), "LDM": (.35, .60, {"DM", "CM"}),
-        "RDM": (.65, .60, {"DM", "CM"}), "LW": (.20, .39, {"LW", "RW", "AM", "ST"}),
-        "AM": (.50, .34, {"AM", "CM", "LW", "RW"}), "RW": (.80, .39, {"RW", "LW", "AM", "ST"}), "ST": (.50, .16, {"ST", "LW", "RW"}),
+        "GK": (.50, .91, {"GK"}), "LB": (.16, .76, {"LB"}), "LCB": (.39, .77, {"CB"}), "RCB": (.61, .77, {"CB"}), "RB": (.84, .76, {"RB"}),
+        "LDM": (.35, .60, {"DM", "CM"}), "RDM": (.65, .60, {"DM", "CM"}), "LW": (.20, .39, {"LW", "AM", "RW"}),
+        "AM": (.50, .34, {"AM", "CM"}), "RW": (.80, .39, {"RW", "AM", "LW"}), "ST": (.50, .16, {"ST", "LW", "RW"}),
     },
     "4-4-2": {
-        "GK": (.50, .91, {"GK"}), "LB": (.15, .76, {"LB", "CB"}), "LCB": (.38, .77, {"CB"}),
-        "RCB": (.62, .77, {"CB"}), "RB": (.85, .76, {"RB", "CB"}), "LM": (.17, .52, {"LW", "LM", "AM", "CM"}),
-        "LCM": (.39, .56, {"CM", "DM", "AM"}), "RCM": (.61, .56, {"CM", "DM", "AM"}), "RM": (.83, .52, {"RW", "RM", "AM", "CM"}),
+        "GK": (.50, .91, {"GK"}), "LB": (.15, .76, {"LB"}), "LCB": (.38, .77, {"CB"}), "RCB": (.62, .77, {"CB"}), "RB": (.85, .76, {"RB"}),
+        "LM": (.17, .52, {"LW", "AM"}), "LCM": (.39, .56, {"CM", "DM"}), "RCM": (.61, .56, {"CM", "DM"}), "RM": (.83, .52, {"RW", "AM"}),
         "LST": (.38, .19, {"ST", "LW", "RW"}), "RST": (.62, .19, {"ST", "LW", "RW"}),
     },
     "4-1-4-1": {
-        "GK": (.50, .91, {"GK"}), "LB": (.15, .76, {"LB", "CB"}), "LCB": (.38, .77, {"CB"}),
-        "RCB": (.62, .77, {"CB"}), "RB": (.85, .76, {"RB", "CB"}), "DM": (.50, .64, {"DM", "CM"}),
-        "LW": (.16, .42, {"LW", "RW", "AM", "ST"}), "LCM": (.38, .48, {"CM", "DM", "AM"}), "RCM": (.62, .48, {"CM", "DM", "AM"}),
-        "RW": (.84, .42, {"RW", "LW", "AM", "ST"}), "ST": (.50, .16, {"ST", "LW", "RW"}),
+        "GK": (.50, .91, {"GK"}), "LB": (.15, .76, {"LB"}), "LCB": (.38, .77, {"CB"}), "RCB": (.62, .77, {"CB"}), "RB": (.85, .76, {"RB"}),
+        "DM": (.50, .64, {"DM", "CM"}), "LW": (.16, .42, {"LW", "AM", "RW"}), "LCM": (.38, .48, {"CM", "DM"}), "RCM": (.62, .48, {"CM", "DM"}),
+        "RW": (.84, .42, {"RW", "AM", "LW"}), "ST": (.50, .16, {"ST", "LW", "RW"}),
+    },
+    "4-3-1-2": {
+        "GK": (.50, .91, {"GK"}), "LB": (.15, .76, {"LB"}), "LCB": (.38, .77, {"CB"}), "RCB": (.62, .77, {"CB"}), "RB": (.85, .76, {"RB"}),
+        "LCM": (.30, .55, {"CM", "DM"}), "DM": (.50, .62, {"DM", "CM"}), "RCM": (.70, .55, {"CM", "DM"}), "AM": (.50, .35, {"AM", "CM"}),
+        "LST": (.38, .18, {"ST", "LW", "RW"}), "RST": (.62, .18, {"ST", "LW", "RW"}),
+    },
+    "4-2-2-2": {
+        "GK": (.50, .91, {"GK"}), "LB": (.15, .76, {"LB"}), "LCB": (.38, .77, {"CB"}), "RCB": (.62, .77, {"CB"}), "RB": (.85, .76, {"RB"}),
+        "LDM": (.36, .61, {"DM", "CM"}), "RDM": (.64, .61, {"DM", "CM"}), "LAM": (.34, .39, {"AM", "LW", "CM"}), "RAM": (.66, .39, {"AM", "RW", "CM"}),
+        "LST": (.38, .18, {"ST", "LW", "RW"}), "RST": (.62, .18, {"ST", "LW", "RW"}),
+    },
+    "4-3-2-1": {
+        "GK": (.50, .91, {"GK"}), "LB": (.15, .76, {"LB"}), "LCB": (.38, .77, {"CB"}), "RCB": (.62, .77, {"CB"}), "RB": (.85, .76, {"RB"}),
+        "LCM": (.30, .56, {"CM", "DM"}), "CM": (.50, .61, {"CM", "DM"}), "RCM": (.70, .56, {"CM", "DM"}), "LAM": (.36, .36, {"AM", "LW", "CM"}),
+        "RAM": (.64, .36, {"AM", "RW", "CM"}), "ST": (.50, .16, {"ST", "LW", "RW"}),
     },
     "3-4-3": {
         "GK": (.50, .91, {"GK"}), "LCB": (.25, .76, {"CB"}), "CB": (.50, .80, {"CB"}), "RCB": (.75, .76, {"CB"}),
-        "LWB": (.13, .53, {"LB", "LW", "CB"}), "LCM": (.38, .56, {"CM", "DM", "AM"}), "RCM": (.62, .56, {"CM", "DM", "AM"}), "RWB": (.87, .53, {"RB", "RW", "CB"}),
-        "LW": (.18, .25, {"LW", "RW", "AM", "ST"}), "ST": (.50, .16, {"ST", "LW", "RW"}), "RW": (.82, .25, {"RW", "LW", "AM", "ST"}),
+        "LWB": (.13, .53, {"LB", "LW"}), "LCM": (.38, .56, {"CM", "DM"}), "RCM": (.62, .56, {"CM", "DM"}), "RWB": (.87, .53, {"RB", "RW"}),
+        "LW": (.18, .25, {"LW", "AM", "RW"}), "ST": (.50, .16, {"ST", "LW", "RW"}), "RW": (.82, .25, {"RW", "AM", "LW"}),
     },
     "3-5-2": {
         "GK": (.50, .91, {"GK"}), "LCB": (.24, .76, {"CB"}), "CB": (.50, .80, {"CB"}), "RCB": (.76, .76, {"CB"}),
-        "LWB": (.12, .53, {"LB", "LW", "CB"}), "LCM": (.32, .56, {"CM", "DM", "AM"}), "CM": (.50, .50, {"CM", "DM", "AM"}), "RCM": (.68, .56, {"CM", "DM", "AM"}), "RWB": (.88, .53, {"RB", "RW", "CB"}),
+        "LWB": (.12, .53, {"LB", "LW"}), "LCM": (.32, .56, {"CM", "DM"}), "CM": (.50, .50, {"CM", "DM"}), "RCM": (.68, .56, {"CM", "DM"}), "RWB": (.88, .53, {"RB", "RW"}),
         "LST": (.38, .19, {"ST", "LW", "RW"}), "RST": (.62, .19, {"ST", "LW", "RW"}),
     },
     "3-4-2-1": {
         "GK": (.50, .91, {"GK"}), "LCB": (.24, .76, {"CB"}), "CB": (.50, .80, {"CB"}), "RCB": (.76, .76, {"CB"}),
-        "LWB": (.13, .54, {"LB", "LW", "CB"}), "LCM": (.38, .57, {"CM", "DM", "AM"}), "RCM": (.62, .57, {"CM", "DM", "AM"}), "RWB": (.87, .54, {"RB", "RW", "CB"}),
-        "LAM": (.34, .34, {"AM", "CM", "LW", "RW", "ST"}), "RAM": (.66, .34, {"AM", "CM", "LW", "RW", "ST"}), "ST": (.50, .16, {"ST", "LW", "RW"}),
+        "LWB": (.13, .54, {"LB", "LW"}), "LCM": (.38, .57, {"CM", "DM"}), "RCM": (.62, .57, {"CM", "DM"}), "RWB": (.87, .54, {"RB", "RW"}),
+        "LAM": (.34, .34, {"AM", "LW", "CM"}), "RAM": (.66, .34, {"AM", "RW", "CM"}), "ST": (.50, .16, {"ST", "LW", "RW"}),
+    },
+    "3-1-4-2": {
+        "GK": (.50, .91, {"GK"}), "LCB": (.25, .76, {"CB"}), "CB": (.50, .80, {"CB"}), "RCB": (.75, .76, {"CB"}),
+        "DM": (.50, .64, {"DM", "CM"}), "LWB": (.12, .48, {"LB", "LW"}), "LCM": (.38, .52, {"CM", "DM"}), "RCM": (.62, .52, {"CM", "DM"}),
+        "RWB": (.88, .48, {"RB", "RW"}), "LST": (.38, .18, {"ST", "LW", "RW"}), "RST": (.62, .18, {"ST", "LW", "RW"}),
+    },
+    "5-3-2": {
+        "GK": (.50, .91, {"GK"}), "LWB": (.12, .62, {"LB", "LW"}), "LCB": (.28, .77, {"CB"}), "CB": (.50, .80, {"CB"}), "RCB": (.72, .77, {"CB"}),
+        "RWB": (.88, .62, {"RB", "RW"}), "LCM": (.30, .49, {"CM", "DM"}), "CM": (.50, .54, {"CM", "DM"}), "RCM": (.70, .49, {"CM", "DM"}),
+        "LST": (.38, .18, {"ST", "LW", "RW"}), "RST": (.62, .18, {"ST", "LW", "RW"}),
+    },
+    "5-4-1": {
+        "GK": (.50, .91, {"GK"}), "LWB": (.12, .68, {"LB", "LW"}), "LCB": (.30, .78, {"CB"}), "CB": (.50, .80, {"CB"}), "RCB": (.70, .78, {"CB"}),
+        "RWB": (.88, .68, {"RB", "RW"}), "LM": (.18, .47, {"LW", "AM"}), "LCM": (.40, .52, {"CM", "DM"}), "RCM": (.60, .52, {"CM", "DM"}),
+        "RM": (.82, .47, {"RW", "AM"}), "ST": (.50, .17, {"ST", "LW", "RW"}),
     },
 }
 
@@ -141,6 +190,22 @@ def db() -> sqlite3.Connection:
 
 def rows(cursor: sqlite3.Cursor) -> list[dict]:
     return [dict(item) for item in cursor.fetchall()]
+
+
+def player_payload(value: sqlite3.Row | dict) -> dict:
+    payload = dict(value)
+    if payload.get("avatar_url"):
+        payload["avatar_kind"] = "verified"
+    else:
+        # A deliberately neutral black silhouette is preferable to a fabricated
+        # portrait when a provider cannot supply a verifiable player image.
+        payload["avatar_url"] = None
+        payload["avatar_kind"] = "default"
+    return payload
+
+
+def player_payloads(values: list[dict]) -> list[dict]:
+    return [player_payload(value) for value in values]
 
 
 def seed_transfer_events(connection: sqlite3.Connection) -> None:
@@ -339,6 +404,7 @@ def init_db() -> None:
         seed(connection)
         seed_transfer_events(connection)
         reconcile_current_rosters(connection)
+        ensure_prestige_players(connection, datetime.now(timezone.utc).isoformat())
         connection.commit()
 
 
@@ -375,9 +441,9 @@ def list_players(q: str = "", position: str = "", club_id: str = "", age_min: in
     if age_max is not None: filters.append("p.age <= ?"); params.append(age_max)
     where = " WHERE " + " AND ".join(filters) if filters else ""
     with closing(db()) as connection:
-        return rows(connection.execute(f"""SELECT p.*, c.name AS club_name,
+        return player_payloads(rows(connection.execute(f"""SELECT p.*, c.name AS club_name,
             EXISTS(SELECT 1 FROM favorites f WHERE f.player_id=p.id) AS favorite
-            FROM players p JOIN clubs c ON c.id=p.club_id WHERE p.is_current=1 {('AND ' + ' AND '.join(filters)) if filters else ''} ORDER BY p.rating DESC, p.name""", params))
+            FROM players p JOIN clubs c ON c.id=p.club_id WHERE p.is_current=1 {('AND ' + ' AND '.join(filters)) if filters else ''} ORDER BY p.name""", params)))
 
 
 @app.get("/api/players/{player_id}")
@@ -386,7 +452,7 @@ def get_player(player_id: str) -> dict:
         result = connection.execute("""SELECT p.*, c.name AS club_name, c.league,
           EXISTS(SELECT 1 FROM favorites f WHERE f.player_id=p.id) AS favorite FROM players p JOIN clubs c ON c.id=p.club_id WHERE p.id=?""", (player_id,)).fetchone()
         if not result: raise HTTPException(404, "未找到球员")
-        payload = dict(result)
+        payload = player_payload(result)
         payload["reports"] = rows(connection.execute("SELECT * FROM reports WHERE player_id=? ORDER BY updated_at DESC", (player_id,)))
         return payload
 
@@ -395,11 +461,11 @@ def get_player(player_id: str) -> dict:
 def list_featured_players(limit: int = Query(default=12, ge=1, le=30)) -> list[dict]:
     """Recent league performers, joined by provider player ID (never name matching)."""
     with closing(db()) as connection:
-        return rows(connection.execute("""SELECT p.*,c.name AS club_name,c.logo_url,f.league_code,f.goals AS recent_goals,
+        return player_payloads(rows(connection.execute("""SELECT p.*,c.name AS club_name,c.logo_url,f.league_code,f.goals AS recent_goals,
             f.assists AS recent_assists,f.rank_score,f.source_updated_at AS featured_updated_at
             FROM featured_players f JOIN players p ON p.id=f.player_id JOIN clubs c ON c.id=p.club_id
             WHERE p.is_current=1
-            ORDER BY f.rank_score DESC,f.goals DESC,f.assists DESC,p.name LIMIT ?""", (limit,)))
+            ORDER BY f.rank_score DESC,f.goals DESC,f.assists DESC,p.name LIMIT ?""", (limit,))))
 
 
 @app.get("/api/clubs")
@@ -415,7 +481,7 @@ def get_club(club_id: str) -> dict:
         if not club: raise HTTPException(404, "未找到俱乐部")
         newest = connection.execute("""SELECT data_source, source_updated_at FROM players
             WHERE club_id=? AND is_current=1 ORDER BY source_updated_at DESC LIMIT 1""", (club_id,)).fetchone()
-        return {"club": dict(club), "season": "当前阵容", "source": newest["data_source"] if newest else "本地演示数据", "synced_at": newest["source_updated_at"] if newest else None, "players": rows(connection.execute("SELECT * FROM players WHERE club_id=? AND is_current=1 ORDER BY CASE position WHEN 'GK' THEN 1 WHEN 'CB' THEN 2 WHEN 'LB' THEN 3 WHEN 'RB' THEN 4 WHEN 'DM' THEN 5 WHEN 'CM' THEN 6 WHEN 'AM' THEN 7 WHEN 'LW' THEN 8 WHEN 'RW' THEN 9 ELSE 10 END, shirt_no", (club_id,)))}
+        return {"club": dict(club), "season": "当前阵容", "source": newest["data_source"] if newest else "本地演示数据", "synced_at": newest["source_updated_at"] if newest else None, "players": player_payloads(rows(connection.execute("SELECT * FROM players WHERE club_id=? AND is_current=1 ORDER BY CASE position WHEN 'GK' THEN 1 WHEN 'CB' THEN 2 WHEN 'LB' THEN 3 WHEN 'RB' THEN 4 WHEN 'DM' THEN 5 WHEN 'CM' THEN 6 WHEN 'AM' THEN 7 WHEN 'LW' THEN 8 WHEN 'RW' THEN 9 ELSE 10 END, shirt_no", (club_id,))))}
 
 
 class FavoriteIn(BaseModel):
@@ -442,7 +508,7 @@ class SlotIn(BaseModel):
 
 class LineupIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
-    formation: Literal["4-3-3", "4-2-3-1", "4-4-2", "4-1-4-1", "3-4-3", "3-5-2", "3-4-2-1"]
+    formation: Literal["4-3-3", "4-2-3-1", "4-4-2", "4-1-4-1", "4-3-1-2", "4-2-2-2", "4-3-2-1", "3-4-3", "3-5-2", "3-4-2-1", "3-1-4-2", "5-3-2", "5-4-1"]
     season: str = "2025/26"
     captain_id: str | None = None
     notes: str = Field(default="", max_length=1000)
@@ -696,9 +762,95 @@ def curate_manchester_city() -> dict:
 
 def provider_age(date_of_birth: str | None) -> int:
     if not date_of_birth: return 0
-    born = datetime.fromisoformat(date_of_birth).date()
+    try:
+        born = datetime.fromisoformat(date_of_birth).date()
+    except ValueError:
+        return 0
     today = datetime.now(timezone.utc).date()
     return today.year - born.year - ((today.month, today.day) < (born.month, born.day))
+
+
+def sportsdb_json(endpoint: str, **params: str) -> dict:
+    query = urllib.parse.urlencode(params)
+    url = f"https://www.thesportsdb.com/api/v1/json/123/{endpoint}"
+    if query:
+        url += f"?{query}"
+    try:
+        with urllib.request.urlopen(url, timeout=20) as response:
+            return json.load(response)
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError) as error:
+        raise HTTPException(502, f"无法读取 TheSportsDB 补充联赛数据：{error}")
+
+
+def sportsdb_team(name: str) -> dict | None:
+    teams = sportsdb_json("searchteams.php", t=name).get("teams") or []
+    wanted = normalize_club_name(name)
+    return next((team for team in teams if normalize_club_name(team.get("strTeam") or "") == wanted), None)
+
+
+def ensure_prestige_players(connection: sqlite3.Connection, refreshed_at: str) -> int:
+    """Keep globally prominent active players searchable outside the five-league plan."""
+    inserted = 0
+    for player_id, name, name_zh, position, born, nation, foot, club_id, shirt_no, club_name, country, league, avatar_url in PRESTIGE_PLAYERS:
+        connection.execute("""INSERT INTO clubs(id,name,country,league) VALUES(?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name,country=excluded.country,league=excluded.league""",
+            (club_id, club_name, country, league))
+        connection.execute("""INSERT INTO players(id,name,name_zh,position,age,nationality,foot,club_id,shirt_no,height_cm,bio,appearances,goals,assists,rating,data_source,source_updated_at,avatar_url,avatar_club_id,avatar_verified_at,is_current)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+            ON CONFLICT(id) DO UPDATE SET name=excluded.name,name_zh=excluded.name_zh,position=excluded.position,age=excluded.age,nationality=excluded.nationality,foot=excluded.foot,club_id=excluded.club_id,shirt_no=excluded.shirt_no,bio=excluded.bio,data_source=excluded.data_source,source_updated_at=excluded.source_updated_at,avatar_url=excluded.avatar_url,avatar_club_id=excluded.avatar_club_id,avatar_verified_at=excluded.avatar_verified_at,is_current=1""",
+            (player_id, name, name_zh, position, provider_age(born), nation, foot, club_id, shirt_no, None,
+             "高声望球员目录；俱乐部与肖像来自公开 TheSportsDB 资料，随补充联赛刷新校验。", 0, 0, 0, 95,
+             "TheSportsDB 高声望球员目录", refreshed_at, avatar_url, club_id, refreshed_at))
+        inserted += 1
+    return inserted
+
+
+def sync_supplemental_clubs() -> dict:
+    """Synchronise prominent clubs in well-known non-five-league competitions."""
+    refreshed_at = datetime.now(timezone.utc).isoformat()
+    results, unavailable = [], []
+    with closing(db()) as connection:
+        for search_name, country, league in SUPPLEMENTAL_CLUBS:
+            try:
+                team = sportsdb_team(search_name)
+                if not team or not team.get("idTeam"):
+                    unavailable.append(search_name)
+                    continue
+                team_id = str(team["idTeam"])
+                club_id = f"tsdb-{team_id}"
+                people = sportsdb_json("lookup_all_players.php", id=team_id).get("player") or []
+                connection.execute("""INSERT INTO clubs(id,name,country,league,logo_url) VALUES(?,?,?,?,?)
+                    ON CONFLICT(id) DO UPDATE SET name=excluded.name,country=excluded.country,league=excluded.league,logo_url=COALESCE(excluded.logo_url,clubs.logo_url)""",
+                    (club_id, team.get("strTeam") or search_name, country, league, team.get("strBadge")))
+                connection.execute("UPDATE players SET is_current=0 WHERE club_id=? AND data_source LIKE 'TheSportsDB%'", (club_id,))
+                imported = 0
+                for person in people:
+                    external_id = person.get("idPlayer")
+                    name = person.get("strPlayer") or ""
+                    if not external_id or not name:
+                        continue
+                    avatar_url = person.get("strThumb") or None
+                    connection.execute("""INSERT INTO players(id,name,name_zh,position,age,nationality,foot,club_id,shirt_no,height_cm,bio,appearances,goals,assists,rating,data_source,source_updated_at,avatar_url,avatar_club_id,avatar_verified_at,is_current)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)
+                        ON CONFLICT(id) DO UPDATE SET name=excluded.name,name_zh=excluded.name_zh,position=excluded.position,age=excluded.age,nationality=excluded.nationality,club_id=excluded.club_id,bio=excluded.bio,data_source=excluded.data_source,source_updated_at=excluded.source_updated_at,avatar_url=COALESCE(excluded.avatar_url,players.avatar_url),avatar_club_id=CASE WHEN excluded.avatar_url IS NOT NULL THEN excluded.avatar_club_id ELSE players.avatar_club_id END,avatar_verified_at=CASE WHEN excluded.avatar_url IS NOT NULL THEN excluded.avatar_verified_at ELSE players.avatar_verified_at END,is_current=1""",
+                        (f"tsdb-{team_id}-{external_id}", name, name, detailed_position(person.get("strPosition")) or "CM", provider_age(person.get("dateBorn")),
+                         person.get("strNationality") or "未知", "未知", club_id, None, None,
+                         "由 TheSportsDB 公开球队名单同步；真实肖像优先，缺失时使用无文字远程头像。", 0, 0, 0, 0,
+                         "TheSportsDB 补充联赛", refreshed_at, avatar_url, club_id if avatar_url else None, refreshed_at if avatar_url else None))
+                    imported += 1
+                connection.execute("INSERT OR REPLACE INTO sync_jobs(id,provider,status,finished_at,entity_count,error) VALUES(?,?,?,?,?,NULL)",
+                    (f"tsdb-{team_id}-{refreshed_at}", "TheSportsDB 补充联赛", "SUCCESS", refreshed_at, imported))
+                results.append({"club_id": club_id, "club_name": team.get("strTeam") or search_name, "players": imported, "league": league})
+            except HTTPException:
+                unavailable.append(search_name)
+        prestige = ensure_prestige_players(connection, refreshed_at)
+        connection.commit()
+    return {"source": "TheSportsDB 公开球队目录", "updated_at": refreshed_at, "clubs": results, "unavailable": unavailable, "prestige_players": prestige}
+
+
+@app.post("/api/admin/sync-supplemental")
+def refresh_supplemental_clubs() -> dict:
+    return sync_supplemental_clubs()
 
 
 def fetch_current_squad(team_id: int, token: str) -> dict:
