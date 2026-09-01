@@ -8,6 +8,7 @@
 - 后端：FastAPI + SSE 流式响应
 - 大模型：Ollama qwen2.5:3b（本地推理）
 - LLM 框架：LangChain + LangGraph
+- LLM 可观测性：LangSmith（可选追踪，默认关闭）
 - 向量存储：Chroma + bge-m3
 - PDF 解析：pdfplumber（多栏布局检测）
 - 部署：Docker Compose
@@ -104,12 +105,23 @@ docker compose up -d
 
 首次启动会自动下载 `qwen2.5:3b` 和 `bge-m3`，完成后访问 http://localhost:3000。默认配置可在 CPU 环境运行；如需 GPU 加速，请按本机 Docker 与 Ollama 的 GPU 配置启用运行时支持。
 
+## LangSmith 可观测性
+
+项目已接入 LangSmith 追踪，可用于查看简历解析、JD 匹配和模拟面试中的模型调用链路、输入输出与耗时。追踪默认关闭，确保本地使用时简历内容不会发送至第三方服务。
+
+1. 复制 `.env.example` 为 `.env`，填入自己的 `LANGSMITH_API_KEY`。
+2. 设置 `LANGSMITH_TRACING=true`；可用 `LANGSMITH_PROJECT` 指定项目名称。
+3. 重启后端或执行 `docker compose up -d`，访问 `/api/health` 确认 `observability.enabled` 为 `true`。
+
+启用追踪前请确认候选人已知悉其数据将被发送到 LangSmith；演示或开发建议使用脱敏简历。
+
 ## 可靠性与数据边界
 
 - 上传文件仅支持 `.pdf` 与 `.docx`，单个文件最大 10MB。
 - 后端对异常请求头、超长 JD/回答和无效面试轮次进行校验。
 - 面试评分始终使用最近一道面试题与本次回答配对，避免对话记录重复导致评分偏差。
 - 前端会在上传前提示超限文件，并在流式接口返回 HTTP 错误时显示可读错误信息。
+- LangSmith 追踪必须同时配置开关和 API Key 才会启用，健康检查不返回密钥内容。
 
 ## 验收标准
 

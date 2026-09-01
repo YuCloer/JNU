@@ -31,6 +31,10 @@ services:
     environment:
       - OLLAMA_HOST=http://ollama:11434
       - CHROMA_HOST=http://chroma:8000
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING:-false}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY:-}
+      - LANGSMITH_PROJECT=${LANGSMITH_PROJECT:-ai-interview-platform}
+      - LANGSMITH_ENDPOINT=${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
     depends_on:
       ollama-init:
         condition: service_completed_successfully

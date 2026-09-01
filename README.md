@@ -33,7 +33,7 @@
 |  | Project | Problem → solution | Engineering highlights |
 | :--: | --- | --- | --- |
 | ⚽ | [ScoutXI](./ScoutXI) | 本地足球球探与阵容规划应用：查询球员、筛选俱乐部并按位置约束构建阵容。 | FastAPI + SQLite；4-3-3 / 4-2-3-1 阵容画布；可选数据 API；本地优先运行。 |
-| 🤝 | [AI Interview Platform](./AI-Interview-Platform) | 为应届生提供本地运行的简历解析、JD 匹配与多轮模拟面试。 | Vue 3 + FastAPI；SSE 流式对话；LangGraph Agent；Ollama 本地推理；Docker Compose 部署。 |
+| 🤝 | [AI Interview Platform](./AI-Interview-Platform) | 为应届生提供本地运行的简历解析、JD 匹配与多轮模拟面试。 | Vue 3 + FastAPI；SSE 流式对话；LangGraph Agent；LangSmith 可选链路追踪；Ollama 本地推理；Docker Compose 部署。 |
 | 📈 | [JNU Grade Checker Guard](./Grade-Watcher) | 自动发现新成绩、推送通知，并完成多维度 GPA 汇总。 | Playwright 自动认证；AES-256-GCM 加密；Windows DPAPI；幂等去重；模块化 Python CLI。 |
 | 🧠 | [Bellman & Advantage Learning](./RL/Bellman) | 在 ChainWalk 环境中比较两种动态规划算法的收敛与动作间隔。 | 理论最优值基准；性能界与 Action Gap 评估；可复现实验图表。 |
 

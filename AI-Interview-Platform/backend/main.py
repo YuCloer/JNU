@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from routers import resume, interview, jd
-from services.llm_client import llm, embeddings
+from services.llm_client import llm, embeddings, get_langsmith_status
 
 app = FastAPI(title="智能简历分析与AI模拟面试平台")
 
@@ -46,7 +46,12 @@ app.include_router(jd.router, prefix="/jd", tags=["JD匹配"])
 @app.get("/api/health")
 async def health_check():
     """健康检查：验证 Ollama LLM 和 Embedding 是否可用"""
-    status = {"llm": "qwen2.5:3b", "embedding": "bge-m3", "status": "ok"}
+    status = {
+        "llm": "qwen2.5:3b",
+        "embedding": "bge-m3",
+        "observability": get_langsmith_status(),
+        "status": "ok",
+    }
     try:
         await asyncio.to_thread(llm.invoke, "hi")
     except Exception:
