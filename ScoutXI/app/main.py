@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import http.client
 import os
 import re
 import sqlite3
@@ -20,6 +21,8 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+
+from .scouting import ability_profile, recommend_xi, select_xi, sort_players_by_ability
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = ROOT / "data"
@@ -46,6 +49,8 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 full_sync_lock = threading.Lock()
 full_sync_status = {"running": False, "remaining": None, "completed": 0, "error": None}
 transfer_sync_status = {"running": False, "remaining": None, "completed": 0, "mapped": 0, "error": None}
+ea_rating_sync_lock = threading.Lock()
+ea_rating_sync_status = {"running": False, "completed_pages": 0, "next_page": 0, "matched": 0, "error": None}
 
 TEAM_SOURCES = {"man-city": 65, "arsenal": 57, "real-madrid": 86, "liverpool": 64, "man-utd": 66, "chelsea": 61, "barcelona": 81, "bayern": 5}
 TEAM_SEARCH_NAMES = {"man-city": "Manchester City", "arsenal": "Arsenal", "real-madrid": "Real Madrid", "liverpool": "Liverpool", "man-utd": "Manchester United", "chelsea": "Chelsea", "barcelona": "Barcelona", "bayern": "Bayern Munich"}
@@ -88,10 +93,9 @@ CURATED_AVATAR_NAMES = frozenset(WIKIMEDIA_PLAYER_TITLES)
 # Verified transfer events are data, not roster code.  They are seeded once
 # into SQLite with source URLs, then the same reconciliation algorithm applies
 # to every event and every club.
-OFFICIAL_TRANSFER_SEED = (
-    ("2026-trafford-leeds", "James Trafford", "man-city", "fd-team-341", "PERMANENT", "2026-08-06", "https://www.mancity.com/news/mens/james-trafford-joins-leeds-united-63921619", "Manchester City"),
-    ("2026-marmoush-spurs", "Omar Marmoush", "man-city", "fd-team-73", "LOAN", "2026-08-27", "https://www.tottenhamhotspur.com/news/1087177/omar-marmoush-arrives-on-loan", "Tottenham Hotspur"),
-)
+# Roster membership comes from the active provider snapshot and its verified
+# transfer feed.  Do not keep player-specific transfer exceptions in code.
+OFFICIAL_TRANSFER_SEED: tuple[tuple, ...] = ()
 
 # API-Football's free roster endpoint may lag the current transfer window, but
 # its team transfer history includes the recent moves.  We therefore use it as
@@ -181,6 +185,14 @@ FORMATION_ZONES = {
 }
 
 
+def formation_zone_payload(formation: str = "4-3-3") -> list[dict]:
+    """Expose one canonical formation definition to API consumers."""
+    return [
+        {"role": role, "x": x, "y": y, "allow": sorted(allow)}
+        for role, (x, y, allow) in FORMATION_ZONES[formation].items()
+    ]
+
+
 def db() -> sqlite3.Connection:
     connection = sqlite3.connect(DB_PATH)
     connection.row_factory = sqlite3.Row
@@ -194,7 +206,11 @@ def rows(cursor: sqlite3.Cursor) -> list[dict]:
 
 def player_payload(value: sqlite3.Row | dict) -> dict:
     payload = dict(value)
-    if payload.get("avatar_url"):
+    payload.update(ability_profile(payload))
+    if not payload.get("avatar_url") and payload.get("ea_avatar_url"):
+        payload["avatar_url"] = payload["ea_avatar_url"]
+        payload["avatar_kind"] = "official_rating"
+    elif payload.get("avatar_url"):
         payload["avatar_kind"] = "verified"
     else:
         # A deliberately neutral black silhouette is preferable to a fabricated
@@ -212,6 +228,23 @@ def seed_transfer_events(connection: sqlite3.Connection) -> None:
     connection.executemany("""INSERT OR IGNORE INTO transfer_events
         (id,player_name,from_club_id,to_club_id,transfer_type,effective_at,source_url,source_name,verified_at)
         VALUES(?,?,?,?,?,?,?,?,?)""", [(*event, datetime.now(timezone.utc).isoformat()) for event in OFFICIAL_TRANSFER_SEED])
+
+
+def remove_legacy_transfer_overrides(connection: sqlite3.Connection) -> None:
+    """Remove earlier hard-coded corrections so they cannot outvote a refresh."""
+    connection.execute("DELETE FROM transfer_events WHERE id IN ('2026-trafford-leeds','2026-marmoush-spurs')")
+
+
+def retire_duplicate_seed_players(connection: sqlite3.Connection) -> int:
+    """A provider record supersedes the old demonstration copy of a player."""
+    legacy = rows(connection.execute("SELECT id,name,club_id FROM players WHERE is_current=1 AND data_source='seed'"))
+    retired = 0
+    for player in legacy:
+        duplicate = connection.execute("SELECT 1 FROM players WHERE is_current=1 AND data_source<>'seed' AND club_id=? AND name=?", (player["club_id"], player["name"])).fetchone()
+        if duplicate:
+            connection.execute("UPDATE players SET is_current=0 WHERE id=?", (player["id"],))
+            retired += 1
+    return retired
 
 
 def transfer_window_start() -> str:
@@ -360,12 +393,15 @@ def init_db() -> None:
             nationality TEXT NOT NULL, foot TEXT NOT NULL, club_id TEXT NOT NULL REFERENCES clubs(id), shirt_no INTEGER,
             height_cm INTEGER, bio TEXT, appearances INTEGER DEFAULT 0, goals INTEGER DEFAULT 0, assists INTEGER DEFAULT 0, rating INTEGER DEFAULT 0,
             data_source TEXT NOT NULL DEFAULT 'seed', source_updated_at TEXT, is_current INTEGER NOT NULL DEFAULT 1,
-            avatar_url TEXT, avatar_club_id TEXT REFERENCES clubs(id), avatar_verified_at TEXT);
+            avatar_url TEXT, avatar_club_id TEXT REFERENCES clubs(id), avatar_verified_at TEXT,
+            ea_overall INTEGER, ea_pace INTEGER, ea_shooting INTEGER, ea_passing INTEGER, ea_dribbling INTEGER,
+            ea_defending INTEGER, ea_physical INTEGER, ea_avatar_url TEXT, ea_reference_url TEXT, ea_updated_at TEXT);
         CREATE TABLE IF NOT EXISTS seasons (id TEXT PRIMARY KEY, name TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS favorites (player_id TEXT PRIMARY KEY REFERENCES players(id), created_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS lineups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, formation TEXT NOT NULL, season TEXT NOT NULL, captain_id TEXT, notes TEXT DEFAULT '', updated_at TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS lineup_slots (lineup_id INTEGER NOT NULL REFERENCES lineups(id) ON DELETE CASCADE, player_id TEXT NOT NULL REFERENCES players(id), role TEXT NOT NULL CHECK(role IN ('STARTER','SUBSTITUTE')), x REAL NOT NULL CHECK(x >= 0 AND x <= 1), y REAL NOT NULL CHECK(y >= 0 AND y <= 1), tactical_role TEXT, PRIMARY KEY(lineup_id, player_id));
+        CREATE TABLE IF NOT EXISTS lineups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, formation TEXT NOT NULL, season TEXT NOT NULL, captain_id TEXT, notes TEXT DEFAULT '', tactic_style TEXT NOT NULL DEFAULT '均衡', mentality TEXT NOT NULL DEFAULT '均衡', attacking_width TEXT NOT NULL DEFAULT '标准', pressing TEXT NOT NULL DEFAULT '中位', updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS lineup_slots (lineup_id INTEGER NOT NULL REFERENCES lineups(id) ON DELETE CASCADE, player_id TEXT NOT NULL REFERENCES players(id), role TEXT NOT NULL CHECK(role IN ('STARTER','SUBSTITUTE')), x REAL NOT NULL CHECK(x >= 0 AND x <= 1), y REAL NOT NULL CHECK(y >= 0 AND y <= 1), tactical_role TEXT, player_role TEXT, duty TEXT, PRIMARY KEY(lineup_id, player_id));
         CREATE TABLE IF NOT EXISTS reports (id INTEGER PRIMARY KEY AUTOINCREMENT, player_id TEXT NOT NULL REFERENCES players(id), technical INTEGER NOT NULL CHECK(technical BETWEEN 1 AND 10), tactical INTEGER NOT NULL CHECK(tactical BETWEEN 1 AND 10), physical INTEGER NOT NULL CHECK(physical BETWEEN 1 AND 10), mental INTEGER NOT NULL CHECK(mental BETWEEN 1 AND 10), strengths TEXT NOT NULL, risks TEXT NOT NULL, tags TEXT NOT NULL, recommendation TEXT NOT NULL, observed_at TEXT NOT NULL, notes TEXT NOT NULL, updated_at TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_reports_player_id ON reports(player_id);
         CREATE TABLE IF NOT EXISTS sync_jobs (id TEXT PRIMARY KEY, provider TEXT NOT NULL, status TEXT NOT NULL, finished_at TEXT, entity_count INTEGER DEFAULT 0, error TEXT);
         CREATE TABLE IF NOT EXISTS provider_teams (external_id INTEGER PRIMARY KEY, club_id TEXT NOT NULL UNIQUE, league_code TEXT NOT NULL, team_name TEXT NOT NULL, last_synced_at TEXT);
         CREATE TABLE IF NOT EXISTS api_football_team_map (
@@ -376,6 +412,13 @@ def init_db() -> None:
             player_id TEXT PRIMARY KEY REFERENCES players(id), league_code TEXT NOT NULL,
             goals INTEGER NOT NULL DEFAULT 0, assists INTEGER NOT NULL DEFAULT 0,
             rank_score INTEGER NOT NULL, source_updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS club_lineup_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, club_id TEXT NOT NULL REFERENCES clubs(id),
+            season TEXT NOT NULL, view_kind TEXT NOT NULL CHECK(view_kind IN ('SEASON_APPEARANCES','LAST_MATCH')),
+            fixture_date TEXT, formation TEXT NOT NULL DEFAULT '4-3-3', source TEXT NOT NULL,
+            slots_json TEXT NOT NULL, updated_at TEXT NOT NULL,
+            UNIQUE(club_id, season, view_kind)
         );
         CREATE TABLE IF NOT EXISTS transfer_events (
             id TEXT PRIMARY KEY, player_name TEXT NOT NULL, from_club_id TEXT NOT NULL, to_club_id TEXT NOT NULL,
@@ -391,6 +434,16 @@ def init_db() -> None:
             "ALTER TABLE players ADD COLUMN avatar_url TEXT",
             "ALTER TABLE players ADD COLUMN avatar_club_id TEXT",
             "ALTER TABLE players ADD COLUMN avatar_verified_at TEXT",
+            "ALTER TABLE players ADD COLUMN ea_overall INTEGER",
+            "ALTER TABLE players ADD COLUMN ea_pace INTEGER",
+            "ALTER TABLE players ADD COLUMN ea_shooting INTEGER",
+            "ALTER TABLE players ADD COLUMN ea_passing INTEGER",
+            "ALTER TABLE players ADD COLUMN ea_dribbling INTEGER",
+            "ALTER TABLE players ADD COLUMN ea_defending INTEGER",
+            "ALTER TABLE players ADD COLUMN ea_physical INTEGER",
+            "ALTER TABLE players ADD COLUMN ea_avatar_url TEXT",
+            "ALTER TABLE players ADD COLUMN ea_reference_url TEXT",
+            "ALTER TABLE players ADD COLUMN ea_updated_at TEXT",
         ]:
             column = statement.split()[5]
             if column not in player_columns:
@@ -399,10 +452,28 @@ def init_db() -> None:
         if "logo_url" not in club_columns:
             connection.execute("ALTER TABLE clubs ADD COLUMN logo_url TEXT")
         slot_columns = {column[1] for column in connection.execute("PRAGMA table_info(lineup_slots)")}
-        if "tactical_role" not in slot_columns:
-            connection.execute("ALTER TABLE lineup_slots ADD COLUMN tactical_role TEXT")
+        for statement in [
+            "ALTER TABLE lineup_slots ADD COLUMN tactical_role TEXT",
+            "ALTER TABLE lineup_slots ADD COLUMN player_role TEXT",
+            "ALTER TABLE lineup_slots ADD COLUMN duty TEXT",
+        ]:
+            column = statement.split()[5]
+            if column not in slot_columns:
+                connection.execute(statement)
+        lineup_columns = {column[1] for column in connection.execute("PRAGMA table_info(lineups)")}
+        for statement in [
+            "ALTER TABLE lineups ADD COLUMN tactic_style TEXT NOT NULL DEFAULT '均衡'",
+            "ALTER TABLE lineups ADD COLUMN mentality TEXT NOT NULL DEFAULT '均衡'",
+            "ALTER TABLE lineups ADD COLUMN attacking_width TEXT NOT NULL DEFAULT '标准'",
+            "ALTER TABLE lineups ADD COLUMN pressing TEXT NOT NULL DEFAULT '中位'",
+        ]:
+            column = statement.split()[5]
+            if column not in lineup_columns:
+                connection.execute(statement)
         seed(connection)
         seed_transfer_events(connection)
+        remove_legacy_transfer_overrides(connection)
+        retire_duplicate_seed_players(connection)
         reconcile_current_rosters(connection)
         ensure_prestige_players(connection, datetime.now(timezone.utc).isoformat())
         connection.commit()
@@ -441,9 +512,12 @@ def list_players(q: str = "", position: str = "", club_id: str = "", age_min: in
     if age_max is not None: filters.append("p.age <= ?"); params.append(age_max)
     where = " WHERE " + " AND ".join(filters) if filters else ""
     with closing(db()) as connection:
-        return player_payloads(rows(connection.execute(f"""SELECT p.*, c.name AS club_name,
-            EXISTS(SELECT 1 FROM favorites f WHERE f.player_id=p.id) AS favorite
-            FROM players p JOIN clubs c ON c.id=p.club_id WHERE p.is_current=1 {('AND ' + ' AND '.join(filters)) if filters else ''} ORDER BY p.name""", params)))
+        values = player_payloads(rows(connection.execute(f"""SELECT p.*, c.name AS club_name,
+            EXISTS(SELECT 1 FROM favorites f WHERE f.player_id=p.id) AS favorite,
+            (SELECT COUNT(*) FROM reports r WHERE r.player_id=p.id) AS scout_report_count,
+            (SELECT ROUND(AVG((r.technical+r.tactical+r.physical+r.mental)/4.0),1) FROM reports r WHERE r.player_id=p.id) AS scout_rating
+            FROM players p JOIN clubs c ON c.id=p.club_id WHERE p.is_current=1 {('AND ' + ' AND '.join(filters)) if filters else ''}""", params)))
+        return sort_players_by_ability(values)
 
 
 @app.get("/api/players/{player_id}")
@@ -454,6 +528,8 @@ def get_player(player_id: str) -> dict:
         if not result: raise HTTPException(404, "未找到球员")
         payload = player_payload(result)
         payload["reports"] = rows(connection.execute("SELECT * FROM reports WHERE player_id=? ORDER BY updated_at DESC", (player_id,)))
+        payload["scout_report_count"] = len(payload["reports"])
+        payload["scout_rating"] = round(sum((item["technical"] + item["tactical"] + item["physical"] + item["mental"]) / 4 for item in payload["reports"]) / len(payload["reports"]), 1) if payload["reports"] else None
         return payload
 
 
@@ -462,7 +538,9 @@ def list_featured_players(limit: int = Query(default=12, ge=1, le=30)) -> list[d
     """Recent league performers, joined by provider player ID (never name matching)."""
     with closing(db()) as connection:
         return player_payloads(rows(connection.execute("""SELECT p.*,c.name AS club_name,c.logo_url,f.league_code,f.goals AS recent_goals,
-            f.assists AS recent_assists,f.rank_score,f.source_updated_at AS featured_updated_at
+            f.assists AS recent_assists,f.rank_score,f.source_updated_at AS featured_updated_at,
+            (SELECT COUNT(*) FROM reports r WHERE r.player_id=p.id) AS scout_report_count,
+            (SELECT ROUND(AVG((r.technical+r.tactical+r.physical+r.mental)/4.0),1) FROM reports r WHERE r.player_id=p.id) AS scout_rating
             FROM featured_players f JOIN players p ON p.id=f.player_id JOIN clubs c ON c.id=p.club_id
             WHERE p.is_current=1
             ORDER BY f.rank_score DESC,f.goals DESC,f.assists DESC,p.name LIMIT ?""", (limit,))))
@@ -481,7 +559,120 @@ def get_club(club_id: str) -> dict:
         if not club: raise HTTPException(404, "未找到俱乐部")
         newest = connection.execute("""SELECT data_source, source_updated_at FROM players
             WHERE club_id=? AND is_current=1 ORDER BY source_updated_at DESC LIMIT 1""", (club_id,)).fetchone()
-        return {"club": dict(club), "season": "当前阵容", "source": newest["data_source"] if newest else "本地演示数据", "synced_at": newest["source_updated_at"] if newest else None, "players": player_payloads(rows(connection.execute("SELECT * FROM players WHERE club_id=? AND is_current=1 ORDER BY CASE position WHEN 'GK' THEN 1 WHEN 'CB' THEN 2 WHEN 'LB' THEN 3 WHEN 'RB' THEN 4 WHEN 'DM' THEN 5 WHEN 'CM' THEN 6 WHEN 'AM' THEN 7 WHEN 'LW' THEN 8 WHEN 'RW' THEN 9 ELSE 10 END, shirt_no", (club_id,))))}
+        return {"club": dict(club), "season": "当前阵容", "source": newest["data_source"] if newest else "本地演示数据", "synced_at": newest["source_updated_at"] if newest else None, "players": player_payloads(rows(connection.execute("""SELECT p.*, (SELECT COUNT(*) FROM reports r WHERE r.player_id=p.id) AS scout_report_count,
+            (SELECT ROUND(AVG((r.technical+r.tactical+r.physical+r.mental)/4.0),1) FROM reports r WHERE r.player_id=p.id) AS scout_rating
+            FROM players p WHERE p.club_id=? AND p.is_current=1 ORDER BY CASE p.position WHEN 'GK' THEN 1 WHEN 'CB' THEN 2 WHEN 'LB' THEN 3 WHEN 'RB' THEN 4 WHEN 'DM' THEN 5 WHEN 'CM' THEN 6 WHEN 'AM' THEN 7 WHEN 'LW' THEN 8 WHEN 'RW' THEN 9 ELSE 10 END, p.shirt_no""", (club_id,))))}
+
+
+def unavailable_squad_view(view_id: str, label: str, detail: str) -> dict:
+    return {"id": view_id, "label": label, "status": "unavailable", "formation": "4-3-3", "slots": [], "source": detail}
+
+
+@app.get("/api/clubs/{club_id}/squad-views")
+def get_club_squad_views(club_id: str, season: str = "2026/27") -> dict:
+    """Team XI views with explicit provenance and no invented match history."""
+    previous = f"{int(season[:4]) - 1}/{season[5:]}" if re.match(r"^\d{4}/\d{2}$", season) else "上赛季"
+    with closing(db()) as connection:
+        club = connection.execute("SELECT id,name FROM clubs WHERE id=?", (club_id,)).fetchone()
+        if not club:
+            raise HTTPException(404, "未找到俱乐部")
+        team = player_payloads(rows(connection.execute("SELECT p.* FROM players p WHERE p.club_id=? AND p.is_current=1", (club_id,))))
+        zones = formation_zone_payload()
+        views = [recommend_xi(team, zones, "4-3-3")]
+        snapshots = {
+            (item["season"], item["view_kind"]): dict(item)
+            for item in connection.execute("SELECT * FROM club_lineup_snapshots WHERE club_id=?", (club_id,)).fetchall()
+        }
+        season_snapshot = snapshots.get((season, "SEASON_APPEARANCES"))
+        if season_snapshot:
+            views.append({"id": "season-appearances", "label": f"{season} 出场最多 XI", "status": "ready", "formation": season_snapshot["formation"],
+                          "slots": json.loads(season_snapshot["slots_json"]), "source": season_snapshot["source"]})
+        elif any(int(item.get("appearances") or 0) > 0 for item in team):
+            ranked = sorted(team, key=lambda item: (-int(item.get("appearances") or 0), -int(item.get("overall") or 0), item["name"]))
+            views.append(select_xi(ranked, zones, "4-3-3", view_id="season-appearances", label=f"{season} 出场最多 XI",
+                                   source="ScoutXI 当前赛季出场数据"))
+        else:
+            views.append(unavailable_squad_view("season-appearances", f"{season} 出场最多 XI", "尚未导入本赛季出场数据；不会用能力值冒充出场次数。"))
+        previous_snapshot = snapshots.get((previous, "SEASON_APPEARANCES"))
+        views.append({"id": "previous-season", "label": f"{previous} 出场最多 XI", "status": "ready", "formation": previous_snapshot["formation"],
+                      "slots": json.loads(previous_snapshot["slots_json"]), "source": previous_snapshot["source"]}
+                     if previous_snapshot else unavailable_squad_view("previous-season", f"{previous} 出场最多 XI", "需同步上一赛季的出场数据后提供。"))
+        last_snapshot = snapshots.get((season, "LAST_MATCH"))
+        views.append({"id": "last-match", "label": "上一场比赛首发", "status": "ready", "formation": last_snapshot["formation"],
+                      "slots": json.loads(last_snapshot["slots_json"]), "source": last_snapshot["source"], "fixture_date": last_snapshot["fixture_date"]}
+                     if last_snapshot else unavailable_squad_view("last-match", "上一场比赛首发", "需从比赛数据源同步首发名单后提供。"))
+        return {"club": dict(club), "season": season, "players": team, "views": views}
+
+
+def save_lineup_snapshot(connection: sqlite3.Connection, club_id: str, season: str, kind: str, formation: str, source: str, slots: list[dict], fixture_date: str | None = None) -> None:
+    connection.execute("""INSERT INTO club_lineup_snapshots(club_id,season,view_kind,fixture_date,formation,source,slots_json,updated_at)
+        VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(club_id,season,view_kind) DO UPDATE SET fixture_date=excluded.fixture_date,
+        formation=excluded.formation,source=excluded.source,slots_json=excluded.slots_json,updated_at=excluded.updated_at""",
+        (club_id, season, kind, fixture_date, formation, source, json.dumps(slots), datetime.now(timezone.utc).isoformat()))
+
+
+@app.post("/api/clubs/{club_id}/squad-views/refresh")
+def refresh_club_squad_views(club_id: str, season: str = "2026/27") -> dict:
+    """Cache provider-supported appearances and latest starting XI for one club.
+
+    It is intentionally user-triggered because fixture data consumes the
+    configured provider quota.  An unavailable plan returns a clear error,
+    rather than a historical fixture masquerading as a current one.
+    """
+    token = os.getenv("API_FOOTBALL_KEY")
+    if not token:
+        raise HTTPException(503, "未配置 API-Football 密钥，无法同步比赛阵容。")
+    season_year = int(season[:4]) if re.match(r"^\d{4}/\d{2}$", season) else current_season_year()
+    with closing(db()) as connection:
+        club = connection.execute("SELECT id,name FROM clubs WHERE id=?", (club_id,)).fetchone()
+        mapping = connection.execute("SELECT external_id FROM api_football_team_map WHERE club_id=?", (club_id,)).fetchone()
+        if not club:
+            raise HTTPException(404, "未找到俱乐部")
+        if not mapping:
+            raise HTTPException(409, "该俱乐部尚无可核验的 API-Football 球队映射；请先执行名单同步。")
+        roster = player_payloads(rows(connection.execute("SELECT p.* FROM players p WHERE p.club_id=? AND p.is_current=1", (club_id,))))
+    team_id = mapping["external_id"]
+    zones = formation_zone_payload()
+    updated: list[str] = []
+    try:
+        stats_payload = api_football_json("players", token, {"team": team_id, "season": season_year})
+        appearances = {}
+        for item in stats_payload.get("response") or []:
+            person = item.get("player") or {}
+            stats = (item.get("statistics") or [{}])[0].get("games") or {}
+            appearances[normalize_person_name(person.get("name") or "")] = int(stats.get("appearences") or 0)
+        ranked = sorted(roster, key=lambda item: (-appearances.get(normalize_person_name(item["name"]), 0), -item["overall"], item["name"]))
+        season_view = select_xi(ranked, zones, "4-3-3", view_id="season-appearances", label=f"{season} 出场最多 XI", source="API-Football 球员出场数据")
+        with closing(db()) as connection:
+            save_lineup_snapshot(connection, club_id, season, "SEASON_APPEARANCES", "4-3-3", season_view["source"], season_view["slots"])
+            connection.commit()
+        updated.append("season-appearances")
+    except HTTPException as error:
+        if error.status_code in (401, 403, 429):
+            raise error
+    try:
+        fixture_payload = api_football_json("fixtures", token, {"team": team_id, "last": 1})
+        fixture = (fixture_payload.get("response") or [{}])[0]
+        fixture_id = (fixture.get("fixture") or {}).get("id")
+        if not isinstance(fixture_id, int):
+            raise ValueError("未返回上一场比赛")
+        lineups = api_football_json("fixtures/lineups", token, {"fixture": fixture_id}).get("response") or []
+        lineup = next((item for item in lineups if (item.get("team") or {}).get("id") == team_id), None)
+        starters = [item.get("player") or {} for item in (lineup or {}).get("startXI") or []]
+        by_name = {normalize_person_name(item["name"]): item for item in roster}
+        actual = [by_name[normalize_person_name(item.get("name") or "")] for item in starters if normalize_person_name(item.get("name") or "") in by_name]
+        if len(actual) < 7:
+            raise ValueError("无法把比赛首发与当前名单可靠匹配")
+        formation = (lineup or {}).get("formation") if (lineup or {}).get("formation") in FORMATION_ZONES else "4-3-3"
+        last_view = select_xi(actual, formation_zone_payload(formation), formation, view_id="last-match", label="上一场比赛首发", source="API-Football 比赛首发")
+        with closing(db()) as connection:
+            save_lineup_snapshot(connection, club_id, season, "LAST_MATCH", formation, last_view["source"], last_view["slots"], (fixture.get("fixture") or {}).get("date"))
+            connection.commit()
+        updated.append("last-match")
+    except (HTTPException, ValueError) as error:
+        if isinstance(error, HTTPException) and error.status_code in (401, 403, 429):
+            raise error
+    return {"club_id": club_id, "season": season, "updated": updated, "message": "已缓存可用的比赛阵容视图。"}
 
 
 class FavoriteIn(BaseModel):
@@ -504,6 +695,8 @@ class SlotIn(BaseModel):
     x: float = Field(ge=0, le=1)
     y: float = Field(ge=0, le=1)
     tactical_role: str | None = None
+    player_role: str | None = Field(default=None, max_length=40)
+    duty: Literal["防守", "支援", "进攻"] | None = None
 
 
 class LineupIn(BaseModel):
@@ -512,6 +705,10 @@ class LineupIn(BaseModel):
     season: str = "2025/26"
     captain_id: str | None = None
     notes: str = Field(default="", max_length=1000)
+    tactic_style: Literal["均衡", "控球", "快速反击", "高位压迫"] = "均衡"
+    mentality: Literal["防守", "谨慎", "均衡", "积极", "进攻"] = "均衡"
+    attacking_width: Literal["窄", "标准", "宽"] = "标准"
+    pressing: Literal["低位", "中位", "高位"] = "中位"
     slots: list[SlotIn] = Field(default_factory=list, max_length=22)
 
 
@@ -553,8 +750,11 @@ def create_lineup(payload: LineupIn) -> dict:
     now = datetime.now(timezone.utc).isoformat()
     with closing(db()) as connection:
         validate_lineup(connection, payload)
-        cursor = connection.execute("INSERT INTO lineups(name,formation,season,captain_id,notes,updated_at) VALUES (?,?,?,?,?,?)", (payload.name, payload.formation, payload.season, payload.captain_id, payload.notes, now))
-        connection.executemany("INSERT INTO lineup_slots(lineup_id,player_id,role,x,y,tactical_role) VALUES (?,?,?,?,?,?)", [(cursor.lastrowid, s.player_id, s.role, s.x, s.y, s.tactical_role) for s in payload.slots])
+        cursor = connection.execute("""INSERT INTO lineups(name,formation,season,captain_id,notes,tactic_style,mentality,attacking_width,pressing,updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)""", (payload.name, payload.formation, payload.season, payload.captain_id, payload.notes,
+                payload.tactic_style, payload.mentality, payload.attacking_width, payload.pressing, now))
+        connection.executemany("""INSERT INTO lineup_slots(lineup_id,player_id,role,x,y,tactical_role,player_role,duty)
+            VALUES (?,?,?,?,?,?,?,?)""", [(cursor.lastrowid, s.player_id, s.role, s.x, s.y, s.tactical_role, s.player_role, s.duty) for s in payload.slots])
         connection.commit()
         return lineup_detail(connection, cursor.lastrowid)
 
@@ -569,9 +769,12 @@ def update_lineup(lineup_id: int, payload: LineupIn) -> dict:
     now = datetime.now(timezone.utc).isoformat()
     with closing(db()) as connection:
         lineup_detail(connection, lineup_id); validate_lineup(connection, payload)
-        connection.execute("UPDATE lineups SET name=?,formation=?,season=?,captain_id=?,notes=?,updated_at=? WHERE id=?", (payload.name, payload.formation, payload.season, payload.captain_id, payload.notes, now, lineup_id))
+        connection.execute("""UPDATE lineups SET name=?,formation=?,season=?,captain_id=?,notes=?,tactic_style=?,mentality=?,attacking_width=?,pressing=?,updated_at=? WHERE id=?""",
+            (payload.name, payload.formation, payload.season, payload.captain_id, payload.notes, payload.tactic_style, payload.mentality,
+             payload.attacking_width, payload.pressing, now, lineup_id))
         connection.execute("DELETE FROM lineup_slots WHERE lineup_id=?", (lineup_id,))
-        connection.executemany("INSERT INTO lineup_slots(lineup_id,player_id,role,x,y,tactical_role) VALUES (?,?,?,?,?,?)", [(lineup_id, s.player_id, s.role, s.x, s.y, s.tactical_role) for s in payload.slots])
+        connection.executemany("""INSERT INTO lineup_slots(lineup_id,player_id,role,x,y,tactical_role,player_role,duty)
+            VALUES (?,?,?,?,?,?,?,?)""", [(lineup_id, s.player_id, s.role, s.x, s.y, s.tactical_role, s.player_role, s.duty) for s in payload.slots])
         connection.commit(); return lineup_detail(connection, lineup_id)
 
 
@@ -599,7 +802,10 @@ def sync_status() -> dict:
         api_football = bool(os.getenv("API_FOOTBALL_KEY"))
         football_data = bool(os.getenv("FOOTBALL_DATA_API_TOKEN"))
         configured = api_football or football_data
-        message = "已配置 API-Football；刷新时将校验本赛季权限并按额度分批处理。" if api_football else ("已配置 football-data.org，可执行当前阵容刷新。" if football_data else "当前使用离线演示数据。设置 API_FOOTBALL_KEY 或 FOOTBALL_DATA_API_TOKEN 后可刷新当前阵容。")
+        # The roster sync pipeline deliberately prefers the dated football-data
+        # snapshot when both providers are configured.  Say that in the UI so a
+        # successful refresh is not mistaken for an API-Football-only refresh.
+        message = "已配置 football-data.org；将按当前赛季阵容快照全量刷新，并以转会记录校验。" if football_data else ("已配置 API-Football；刷新时将校验本赛季权限并按额度分批处理。" if api_football else "当前使用离线演示数据。设置 API_FOOTBALL_KEY 或 FOOTBALL_DATA_API_TOKEN 后可刷新当前阵容。")
         return {"mode": "provider_ready" if configured else "local_demo", "message": message, "jobs": rows(connection.execute("SELECT * FROM sync_jobs ORDER BY finished_at DESC"))}
 
 
@@ -688,6 +894,131 @@ def fetch_wikimedia_player_avatar(name: str) -> str | None:
     normalized = normalize_person_name(name)
     page = next((item for item in pages.values() if normalize_person_name((item.get("title") or "").split("(")[0]) == normalized), {})
     return (page.get("thumbnail") or {}).get("source")
+
+
+EA_RATINGS_URL = "https://drop-api.ea.com/rating/ea-sports-fc?locale=en&limit=100&gender=0&offset={}"
+
+
+def ea_person_name(item: dict) -> str:
+    return " ".join(part for part in (item.get("firstName"), item.get("lastName")) if part).strip() or (item.get("commonName") or "")
+
+
+def ea_person_names(item: dict) -> list[str]:
+    """Return both legal/full and football-common names from EA's catalogue.
+
+    A common name is essential for players such as Rodri, Cherki and Endrick;
+    it is used as a matching alias only, never as a fuzzy match.
+    """
+    names = [ea_person_name(item), item.get("commonName") or ""]
+    return list(dict.fromkeys(name for name in names if name.strip()))
+
+
+def sync_ea_fc_ratings(max_pages: int = 190, start_page: int = 0) -> dict:
+    """Import public EA rating references and portrait URLs without storing images.
+
+    Matching is exact on normalised name plus current club; a name-only match is
+    allowed only when it is unique in the local current roster.
+    """
+    with closing(db()) as connection:
+        local = rows(connection.execute("SELECT p.id,p.name,c.name AS club_name FROM players p JOIN clubs c ON c.id=p.club_id WHERE p.is_current=1"))
+    by_name: dict[str, list[dict]] = {}
+    for player in local:
+        by_name.setdefault(normalize_person_name(player["name"]), []).append(player)
+    matched, pages, seen = 0, 0, set()
+    refreshed_at = datetime.now(timezone.utc).isoformat()
+    for page in range(start_page, start_page + max_pages):
+        request = urllib.request.Request(EA_RATINGS_URL.format(page * 100), headers={"User-Agent": "ScoutXI/0.3 (local scouting application)"})
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(request, timeout=25) as response:
+                    items = (json.load(response) or {}).get("items") or []
+                break
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, ValueError, http.client.IncompleteRead) as error:
+                if attempt == 2:
+                    raise HTTPException(502, f"无法读取 EA 公开评分数据：{error}")
+                # A public catalogue occasionally stalls.  Retrying this exact
+                # page is safe because updates are idempotent.
+                time.sleep(1.5 * (attempt + 1))
+        if not items:
+            break
+        pages += 1
+        updates = []
+        for item in items:
+            candidates: list[dict] = []
+            for name in ea_person_names(item):
+                candidates.extend(by_name.get(normalize_person_name(name), []))
+            candidates = list({candidate["id"]: candidate for candidate in candidates}.values())
+            if not candidates:
+                continue
+            team_name = ((item.get("team") or {}).get("label") or "")
+            exact = [player for player in candidates if normalize_club_name(player["club_name"]) == normalize_club_name(team_name)]
+            candidate = exact[0] if len(exact) == 1 else (candidates[0] if len(candidates) == 1 else None)
+            if not candidate or candidate["id"] in seen:
+                continue
+            stats = item.get("stats") or {}
+            def stat(key: str) -> int | None:
+                value = (stats.get(key) or {}).get("value")
+                return int(value) if isinstance(value, (int, float)) else None
+            overall = item.get("overallRating")
+            if not isinstance(overall, (int, float)):
+                continue
+            ea_id = item.get("id")
+            updates.append((max(60, int(overall)), stat("pac"), stat("sho"), stat("pas"), stat("dri"), stat("def"), stat("phy"),
+                            item.get("avatarUrl"), f"https://www.ea.com/games/ea-sports-fc/ratings/player-ratings/{ea_id}", refreshed_at, candidate["id"]))
+            seen.add(candidate["id"])
+        if updates:
+            with closing(db()) as connection:
+                connection.executemany("""UPDATE players SET ea_overall=?,ea_pace=?,ea_shooting=?,ea_passing=?,ea_dribbling=?,
+                    ea_defending=?,ea_physical=?,ea_avatar_url=?,ea_reference_url=?,ea_updated_at=? WHERE id=?""", updates)
+                connection.commit()
+            matched += len(updates)
+        time.sleep(0.12)
+    return {"source": "EA SPORTS FC 公开评分页", "start_page": start_page, "pages": pages, "next_page": start_page + pages,
+            "matched": matched, "unmatched": len(local) - len(seen), "refreshed_at": refreshed_at}
+
+
+@app.post("/api/admin/sync-ea-ratings")
+def refresh_ea_fc_ratings(max_pages: int = Query(default=190, ge=1, le=220), start_page: int = Query(default=0, ge=0)) -> dict:
+    return sync_ea_fc_ratings(max_pages, start_page)
+
+
+def run_full_ea_rating_sync() -> None:
+    ea_rating_sync_status["running"] = True
+    ea_rating_sync_status["error"] = None
+    try:
+        page = ea_rating_sync_status["next_page"]
+        while page < 220:
+            result = sync_ea_fc_ratings(max_pages=8, start_page=page)
+            ea_rating_sync_status["completed_pages"] = result["next_page"]
+            ea_rating_sync_status["next_page"] = result["next_page"]
+            ea_rating_sync_status["matched"] += result["matched"]
+            if result["pages"] < 8:
+                break
+            page = result["next_page"]
+    except Exception as error:
+        ea_rating_sync_status["error"] = str(error)
+    finally:
+        ea_rating_sync_status["running"] = False
+        ea_rating_sync_lock.release()
+
+
+@app.post("/api/admin/start-ea-rating-sync")
+def start_ea_rating_sync(start_page: int | None = Query(default=None, ge=0, le=220)) -> dict:
+    if not ea_rating_sync_lock.acquire(blocking=False):
+        return {"started": False, **ea_rating_sync_status}
+    # A completed import starts a fresh audit; an interrupted one resumes from
+    # the first page that was not committed.
+    if start_page is not None:
+        ea_rating_sync_status.update({"completed_pages": start_page, "next_page": start_page, "matched": 0, "error": None})
+    elif not ea_rating_sync_status.get("error"):
+        ea_rating_sync_status.update({"completed_pages": 0, "next_page": 0, "matched": 0})
+    threading.Thread(target=run_full_ea_rating_sync, daemon=True, name="scoutxi-ea-ratings").start()
+    return {"started": True, **ea_rating_sync_status}
+
+
+@app.get("/api/admin/ea-rating-sync-progress")
+def ea_rating_sync_progress() -> dict:
+    return dict(ea_rating_sync_status)
 
 
 @app.post("/api/admin/enrich-avatars")
@@ -1049,6 +1380,13 @@ def sync_all_current_squads() -> dict:
         raise HTTPException(503, "未配置 football-data.org 密钥，无法同步五大联赛全部球队。")
     if not full_sync_lock.acquire(blocking=False):
         return {"started": False, **full_sync_status}
+    # A manual *full* refresh must not treat an old successful batch as fresh.
+    # Reset every provider cursor first, then the worker traverses all clubs in
+    # rate-safe batches instead of stopping after only the previously-pending
+    # teams.
+    with closing(db()) as connection:
+        connection.execute("UPDATE provider_teams SET last_synced_at=NULL")
+        connection.commit()
     full_sync_status.update({"running": True, "remaining": None, "completed": 0, "error": None})
     threading.Thread(target=run_full_football_data_sync, args=(token,), daemon=True, name="scoutxi-full-squad-sync").start()
     return {"started": True, **full_sync_status}
